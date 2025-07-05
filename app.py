@@ -46,6 +46,7 @@ current_config = {
     'lower_y': 30,
     'upper_y': 70
 }
+last_update_time = datetime.utcnow()
 
 # Funciones de cálculo
 def compute_rsi(series, period=14):
@@ -68,8 +69,8 @@ def fetch_ohlcv(symbol, timeframe, lookback=30):
         return df
     except Exception as e:
         print(f"Error fetching {symbol} {timeframe}: {str(e)[:100]}")
-        time.sleep(2)
-        return fetch_ohlcv(symbol, timeframe, lookback)
+        time.sleep(1)
+        return None
 
 def calculate_volume_category(volumes):
     if len(volumes) == 0:
@@ -79,7 +80,7 @@ def calculate_volume_category(volumes):
     return ['Alto' if vol >= high_thresh else 'Bajo' if vol <= low_thresh else 'Medio' for vol in volumes]
 
 def fetch_all_data():
-    global rsi_data
+    global rsi_data, last_update_time
     
     print("Iniciando actualización de datos...")
     start_time = time.time()
@@ -94,7 +95,7 @@ def fetch_all_data():
             if df is not None:
                 btc_data[tf] = compute_rsi(df['close'], period=current_config['rsi_period']).iloc[-1]
                 btc_data['volume'] = df['vol'].mean()
-            time.sleep(0.05)
+            time.sleep(0.1)
         btc_data['symbol'] = 'BTC/USDT'
         rsi_results.append(btc_data)
         volume_results.append(btc_data['volume'])
@@ -108,13 +109,15 @@ def fetch_all_data():
             
         try:
             asset_data = {}
-            for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
+            # Solo obtener los timeframes necesarios
+            timeframes = set(['15m', '30m', '1h', '2h', '4h', '1d', '1w'])
+            for tf in timeframes:
                 df = fetch_ohlcv(sym, tf)
                 if df is not None:
                     asset_data[tf] = compute_rsi(df['close'], period=current_config['rsi_period']).iloc[-1]
                     if tf == '1h':
                         asset_data['volume'] = df['vol'].mean()
-                time.sleep(0.05)
+                time.sleep(0.1)
             
             if 'volume' in asset_data:
                 asset_data['symbol'] = sym
@@ -141,8 +144,10 @@ def fetch_all_data():
         rsi_data = df
     
     elapsed = time.time() - start_time
+    last_update_time = datetime.utcnow()
     print(f"Datos actualizados en {elapsed:.2f} segundos")
     print(f"Criptos obtenidas: {len(rsi_data)}/{len(symbols)}")
+    return True
 
 def create_plot():
     if rsi_data.empty:
@@ -170,14 +175,15 @@ def create_plot():
                 'green' if row['volume_cat'] == 'Alto' else \
                 'blue' if row['volume_cat'] == 'Medio' else 'red'
         
-        size = 30 if symbol == 'BTC/USDT' else 15
+        # Tamaños aumentados para mejor visibilidad
+        size = 50 if symbol == 'BTC/USDT' else 30
         name = symbol.split('/')[0]
         
         # Configurar estilo de texto
         if symbol == 'BTC/USDT':
-            textfont = dict(size=15, color='darkorange', family='Arial', weight='bold')
+            textfont = dict(size=18, color='darkorange', family='Arial', weight='bold')
         else:
-            textfont = dict(size=10, color='black')
+            textfont = dict(size=14, color='black', weight='bold')
         
         traces.append(go.Scatter(
             x=[row[x_time]],
@@ -193,38 +199,38 @@ def create_plot():
             textfont=textfont,
             name=name,
             hoverinfo='text',
-            hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%"
+            hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: {row['volume_cat']}"
         ))
     
     # Crear figura
     fig = go.Figure(data=traces)
     
-    # Añadir líneas de referencia
+    # Añadir líneas de referencia más gruesas
     fig.add_shape(type="line", x0=current_config['lower_x'], y0=0, x1=current_config['lower_x'], y1=100,
-                  line=dict(color="Green", width=2, dash="dash"))
+                  line=dict(color="Green", width=3, dash="dash"))
     fig.add_shape(type="line", x0=current_config['upper_x'], y0=0, x1=current_config['upper_x'], y1=100,
-                  line=dict(color="Red", width=2, dash="dash"))
+                  line=dict(color="Red", width=3, dash="dash"))
     fig.add_shape(type="line", x0=0, y0=current_config['lower_y'], x1=100, y1=current_config['lower_y'],
-                  line=dict(color="Green", width=2, dash="dash"))
+                  line=dict(color="Green", width=3, dash="dash"))
     fig.add_shape(type="line", x0=0, y0=current_config['upper_y'], x1=100, y1=current_config['upper_y'],
-                  line=dict(color="Red", width=2, dash="dash"))
+                  line=dict(color="Red", width=3, dash="dash"))
     
-    # Añadir zonas de sobrecompra/sobreventa
+    # Añadir zonas de sobrecompra/sobreventa más visibles
     fig.add_hrect(
         y0=current_config['upper_y'], y1=100,
-        line_width=0, fillcolor="red", opacity=0.1
+        line_width=0, fillcolor="red", opacity=0.15
     )
     fig.add_hrect(
         y0=0, y1=current_config['lower_y'],
-        line_width=0, fillcolor="green", opacity=0.1
+        line_width=0, fillcolor="green", opacity=0.15
     )
     fig.add_vrect(
         x0=current_config['upper_x'], x1=100,
-        line_width=0, fillcolor="red", opacity=0.1
+        line_width=0, fillcolor="red", opacity=0.15
     )
     fig.add_vrect(
         x0=0, x1=current_config['lower_x'],
-        line_width=0, fillcolor="green", opacity=0.1
+        line_width=0, fillcolor="green", opacity=0.15
     )
     
     # Configurar layout
@@ -241,7 +247,10 @@ def create_plot():
             tickvals=list(range(0, 101, 10)),
             ticktext=[f"{x}%" for x in range(0, 101, 10)],
             showgrid=True,
-            zeroline=False
+            gridwidth=1,
+            gridcolor='lightgray',
+            zeroline=False,
+            tickfont=dict(size=14)
         ),
         yaxis=dict(
             range=[0, 100],
@@ -249,12 +258,15 @@ def create_plot():
             tickvals=list(range(0, 101, 10)),
             ticktext=[f"{y}%" for y in range(0, 101, 10)],
             showgrid=True,
-            zeroline=False
+            gridwidth=1,
+            gridcolor='lightgray',
+            zeroline=False,
+            tickfont=dict(size=14)
         ),
         template="plotly_white",
         showlegend=False,
-        height=700,
-        margin=dict(l=50, r=50, b=100, t=100, pad=20)
+        height=800,
+        margin=dict(l=80, r=80, b=100, t=120, pad=20)
     )
     
     return fig
@@ -264,36 +276,64 @@ def create_plot():
 def index():
     fig = create_plot()
     graph_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-    return render_template('index.html', graph_html=graph_html)
+    return render_template('index.html', graph_html=graph_html, 
+                           current_config=current_config,
+                           last_update=last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
 # API para actualizar configuración
 @app.route('/update_config', methods=['POST'])
 def update_config():
-    data = request.json
+    global current_config, last_update_time
+    
+    data = request.get_json()
     param = data.get('param')
     value = data.get('value')
     
+    # Mapa de timeframes
+    timeframe_map = {
+        '15m_1h': ('15m', '1h'),
+        '30m_2h': ('30m', '2h'),
+        '1h_4h': ('1h', '4h'),
+        '4h_1d': ('4h', '1d'),
+        '1d_1w': ('1d', '1w')
+    }
+    
     if param == 'timeframe':
-        timeframe_map = {
-            '15m_1h': ('15m', '1h'),
-            '30m_2h': ('30m', '2h'),
-            '1h_4h': ('1h', '4h'),
-            '4h_1d': ('4h', '1d'),
-            '1d_1w': ('1d', '1w')
-        }
         current_config[param] = timeframe_map.get(value, ('15m', '1h'))
-    elif param in ['volume_filter', 'rsi_period']:
+        fetch_all_data()
+    elif param == 'volume_filter':
         current_config[param] = value
-    elif param in ['lower_x', 'upper_x', 'lower_y', 'upper_y']:
+    elif param == 'rsi_period':
+        current_config[param] = int(value)
+        fetch_all_data()
+    elif param == 'lower_x':
+        current_config[param] = int(value)
+    elif param == 'upper_x':
+        current_config[param] = int(value)
+    elif param == 'lower_y':
+        current_config[param] = int(value)
+    elif param == 'upper_y':
         current_config[param] = int(value)
     
-    return jsonify(success=True)
+    # Crear nuevo gráfico
+    fig = create_plot()
+    graph_html = fig.to_html(full_html=False, include_plotlyjs=False)
+    
+    return jsonify({
+        'success': True,
+        'graph_html': graph_html,
+        'last_update': last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+    })
 
 # Función para actualizar datos en segundo plano usando threading
 def background_update():
     while True:
-        fetch_all_data()
-        time.sleep(300)  # Actualizar cada 5 minutos
+        try:
+            fetch_all_data()
+            time.sleep(300)  # Actualizar cada 5 minutos
+        except Exception as e:
+            print(f"Error en actualización automática: {e}")
+            time.sleep(60)
 
 # Iniciar la aplicación
 if __name__ == '__main__':
@@ -307,4 +347,4 @@ if __name__ == '__main__':
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)

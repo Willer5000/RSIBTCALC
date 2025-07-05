@@ -4,4 +4,3 @@ numpy
 ccxt
 plotly
 gunicorn
-

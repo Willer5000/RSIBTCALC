@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RSI Criptomonedas en Tiempo Real</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: #f5f5f5; 
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+        }
+        #graph { 
+            height: 70vh; 
+            background: white; 
+            border-radius: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }
+        .controls { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); 
+            gap: 10px; 
+            margin-bottom: 20px; 
+        }
+        .control-group { 
+            background: white; 
+            padding: 15px; 
+            border-radius: 5px; 
+            box-shadow: 0 1px 5px rgba(0,0,0,0.05); 
+        }
+        label { 
+            display: block; 
+            margin-bottom: 5px; 
+            font-weight: bold; 
+            color: #333; 
+        }
+        select { 
+            width: 100%; 
+            padding: 8px; 
+            border-radius: 4px; 
+            border: 1px solid #ddd; 
+            background: #f9f9f9; 
+        }
+        .update-info { 
+            text-align: center; 
+            margin-top: 10px; 
+            color: #666; 
+            font-size: 14px; 
+        }
+        .btn-container {
+            text-align: center;
+            margin: 15px 0;
+        }
+        .btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Análisis RSI de Criptomonedas</h1>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label>Escalas Temporales</label>
+                <select id="timeframe" onchange="updateConfig('timeframe', this.value)">
+                    <option value="15m_1h">15m vs 1h</option>
+                    <option value="30m_2h">30m vs 2h</option>
+                    <option value="1h_4h">1h vs 4h</option>
+                    <option value="4h_1d">4h vs 1d</option>
+                    <option value="1d_1w">1d vs 1w</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Filtro por Volumen</label>
+                <select id="volumeFilter" onchange="updateConfig('volume_filter', this.value)">
+                    <option value="Todas">Todas</option>
+                    <option value="Alto">Volumen Alto</option>
+                    <option value="Medio">Volumen Medio</option>
+                    <option value="Bajo">Volumen Bajo</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Período RSI</label>
+                <select id="rsiPeriod" onchange="updateConfig('rsi_period', this.value)">
+                    <option value="7">7 días</option>
+                    <option value="14" selected>14 días</option>
+                    <option value="21">21 días</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Límite Inf. (X)</label>
+                <select id="lowerX" onchange="updateConfig('lower_x', this.value)">
+                    <option value="5">5</option>
+                    <option value="10">10</option>
+                    <option value="15">15</option>
+                    <option value="20">20</option>
+                    <option value="25">25</option>
+                    <option value="30" selected>30</option>
+                    <option value="35">35</option>
+                    <option value="40">40</option>
+                    <option value="45">45</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Límite Sup. (X)</label>
+                <select id="upperX" onchange="updateConfig('upper_x', this.value)">
+                    <option value="55">55</option>
+                    <option value="60">60</option>
+                    <option value="65">65</option>
+                    <option value="70" selected>70</option>
+                    <option value="75">75</option>
+                    <option value="80">80</option>
+                    <option value="85">85</option>
+                    <option value="90">90</option>
+                    <option value="95">95</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Límite Inf. (Y)</label>
+                <select id="lowerY" onchange="updateConfig('lower_y', this.value)">
+                    <option value="5">5</option>
+                    <option value="10">10</option>
+                    <option value="15">15</option>
+                    <option value="20">20</option>
+                    <option value="25">25</option>
+                    <option value="30" selected>30</option>
+                    <option value="35">35</option>
+                    <option value="40">40</option>
+                    <option value="45">45</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Límite Sup. (Y)</label>
+                <select id="upperY" onchange="updateConfig('upper_y', this.value)">
+                    <option value="55">55</option>
+                    <option value="60">60</option>
+                    <option value="65">65</option>
+                    <option value="70" selected>70</option>
+                    <option value="75">75</option>
+                    <option value="80">80</option>
+                    <option value="85">85</option>
+                    <option value="90">90</option>
+                    <option value="95">95</option>
+                </select>
+            </div>
+        </div>
+        
+        <div class="btn-container">
+            <button class="btn" onclick="refreshData()">Actualizar Datos</button>
+        </div>
+        
+        <div id="graph">{{ graph_html|safe }}</div>
+        
+        <div class="update-info">
+            Actualización automática cada 5 minutos | Última actualización: <span id="lastUpdate"></span>
+        </div>
+    </div>
+
+    <script>
+        // Mostrar hora de última actualización
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+        
+        // Función para actualizar configuración
+        function updateConfig(param, value) {
+            fetch(`/update_config/${param}/${value}`)
+                .then(response => response.json())
+                .then(data => {
+                    if(data.success) {
+                        location.reload();
+                    }
+                });
+        }
+        
+        // Función para forzar actualización de datos
+        function refreshData() {
+            fetch('/update_config/refresh/true')
+                .then(response => response.json())
+                .then(data => {
+                    if(data.success) {
+                        location.reload();
+                    }
+                });
+        }
+        
+        // Recargar la página cada 5 minutos
+        setInterval(() => {
+            location.reload();
+        }, 300000); // 5 minutos
+    </script>
+</body>
+</html>

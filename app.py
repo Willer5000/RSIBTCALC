@@ -7,7 +7,6 @@ from datetime import datetime
 import plotly.graph_objs as go
 import threading
 import os
-from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
@@ -290,15 +289,21 @@ def update_config():
     
     return jsonify(success=True)
 
-# Función para actualizar datos en segundo plano
-scheduler = BackgroundScheduler()
-scheduler.add_job(fetch_all_data, 'interval', minutes=5)
-scheduler.start()
+# Función para actualizar datos en segundo plano usando threading
+def background_update():
+    while True:
+        fetch_all_data()
+        time.sleep(300)  # Actualizar cada 5 minutos
 
 # Iniciar la aplicación
 if __name__ == '__main__':
     # Carga inicial de datos
     fetch_all_data()
+    
+    # Iniciar hilo de actualización
+    t = threading.Thread(target=background_update)
+    t.daemon = True
+    t.start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))

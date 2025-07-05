@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: rsibtcalc
+    runtime: python
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app

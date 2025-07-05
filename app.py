@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import ccxt
 import pandas as pd
 import numpy as np
@@ -7,6 +7,7 @@ from datetime import datetime
 import plotly.graph_objs as go
 import threading
 import os
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
@@ -57,7 +58,7 @@ def compute_rsi(series, period=14):
     rs = ma_up / ma_down
     return 100 - (100 / (1 + rs))
 
-def fetch_ohlcv(symbol, timeframe, lookback=100):
+def fetch_ohlcv(symbol, timeframe, lookback=30):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
         if not ohlcv:
@@ -67,8 +68,9 @@ def fetch_ohlcv(symbol, timeframe, lookback=100):
         df['vol'] = df['vol'].astype(float)
         return df
     except Exception as e:
-        print(f"Error fetching {symbol} {timeframe}: {e}")
-        return None
+        print(f"Error fetching {symbol} {timeframe}: {str(e)[:100]}")
+        time.sleep(2)
+        return fetch_ohlcv(symbol, timeframe, lookback)
 
 def calculate_volume_category(volumes):
     if len(volumes) == 0:
@@ -80,6 +82,8 @@ def calculate_volume_category(volumes):
 def fetch_all_data():
     global rsi_data
     
+    print("Iniciando actualización de datos...")
+    start_time = time.time()
     rsi_results = []
     volume_results = []
     
@@ -136,8 +140,10 @@ def fetch_all_data():
             }])], ignore_index=True)
         
         rsi_data = df
-        return True
-    return False
+    
+    elapsed = time.time() - start_time
+    print(f"Datos actualizados en {elapsed:.2f} segundos")
+    print(f"Criptos obtenidas: {len(rsi_data)}/{len(symbols)}")
 
 def create_plot():
     if rsi_data.empty:
@@ -156,9 +162,6 @@ def create_plot():
     
     # Obtener ejes
     x_time, y_time = current_config['timeframe']
-    x_values = plot_data[x_time]
-    y_values = plot_data[y_time]
-    symbols_plot = plot_data['symbol']
     
     # Crear trazas
     traces = []
@@ -168,19 +171,30 @@ def create_plot():
                 'green' if row['volume_cat'] == 'Alto' else \
                 'blue' if row['volume_cat'] == 'Medio' else 'red'
         
-        size = 20 if symbol == 'BTC/USDT' else 10
+        size = 30 if symbol == 'BTC/USDT' else 15
         name = symbol.split('/')[0]
+        
+        # Configurar estilo de texto
+        if symbol == 'BTC/USDT':
+            textfont = dict(size=15, color='darkorange', family='Arial', weight='bold')
+        else:
+            textfont = dict(size=10, color='black')
         
         traces.append(go.Scatter(
             x=[row[x_time]],
             y=[row[y_time]],
             mode='markers+text',
-            marker=dict(size=size, color=color),
+            marker=dict(
+                size=size,
+                color=color,
+                line=dict(width=2, color='black')
+            ),
             text=name,
             textposition='top center',
+            textfont=textfont,
             name=name,
             hoverinfo='text',
-            hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}<br>RSI {y_time}: {row[y_time]:.2f}"
+            hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%"
         ))
     
     # Crear figura
@@ -196,19 +210,52 @@ def create_plot():
     fig.add_shape(type="line", x0=0, y0=current_config['upper_y'], x1=100, y1=current_config['upper_y'],
                   line=dict(color="Red", width=2, dash="dash"))
     
+    # Añadir zonas de sobrecompra/sobreventa
+    fig.add_hrect(
+        y0=current_config['upper_y'], y1=100,
+        line_width=0, fillcolor="red", opacity=0.1
+    )
+    fig.add_hrect(
+        y0=0, y1=current_config['lower_y'],
+        line_width=0, fillcolor="green", opacity=0.1
+    )
+    fig.add_vrect(
+        x0=current_config['upper_x'], x1=100,
+        line_width=0, fillcolor="red", opacity=0.1
+    )
+    fig.add_vrect(
+        x0=0, x1=current_config['lower_x'],
+        line_width=0, fillcolor="green", opacity=0.1
+    )
+    
     # Configurar layout
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M (UTC)")
     title = f"RSI ({current_config['timeframe'][0]} vs {current_config['timeframe'][1]}) | Período: {current_config['rsi_period']} | Filtro: {current_config['volume_filter']}"
     
     fig.update_layout(
-        title=f"{title}<br>{now}",
+        title=dict(text=f"{title}<br>{now}", font=dict(size=24)),
         xaxis_title=f"RSI {current_config['timeframe'][0]} (Límites: {current_config['lower_x']}/{current_config['upper_x']})",
         yaxis_title=f"RSI {current_config['timeframe'][1]} (Límites: {current_config['lower_y']}/{current_config['upper_y']})",
-        xaxis_range=[0, 100],
-        yaxis_range=[0, 100],
+        xaxis=dict(
+            range=[0, 100],
+            tickmode='array',
+            tickvals=list(range(0, 101, 10)),
+            ticktext=[f"{x}%" for x in range(0, 101, 10)],
+            showgrid=True,
+            zeroline=False
+        ),
+        yaxis=dict(
+            range=[0, 100],
+            tickmode='array',
+            tickvals=list(range(0, 101, 10)),
+            ticktext=[f"{y}%" for y in range(0, 101, 10)],
+            showgrid=True,
+            zeroline=False
+        ),
         template="plotly_white",
         showlegend=False,
-        height=700
+        height=700,
+        margin=dict(l=50, r=50, b=100, t=100, pad=20)
     )
     
     return fig
@@ -217,12 +264,16 @@ def create_plot():
 @app.route('/')
 def index():
     fig = create_plot()
-    graph_html = fig.to_html(full_html=False)
+    graph_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
     return render_template('index.html', graph_html=graph_html)
 
 # API para actualizar configuración
-@app.route('/update_config/<param>/<value>')
-def update_config(param, value):
+@app.route('/update_config', methods=['POST'])
+def update_config():
+    data = request.json
+    param = data.get('param')
+    value = data.get('value')
+    
     if param == 'timeframe':
         timeframe_map = {
             '15m_1h': ('15m', '1h'),
@@ -240,20 +291,14 @@ def update_config(param, value):
     return jsonify(success=True)
 
 # Función para actualizar datos en segundo plano
-def background_update():
-    while True:
-        fetch_all_data()
-        time.sleep(300)  # Actualizar cada 5 minutos
+scheduler = BackgroundScheduler()
+scheduler.add_job(fetch_all_data, 'interval', minutes=5)
+scheduler.start()
 
 # Iniciar la aplicación
 if __name__ == '__main__':
     # Carga inicial de datos
     fetch_all_data()
-    
-    # Iniciar hilo de actualización
-    t = threading.Thread(target=background_update)
-    t.daemon = True
-    t.start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))

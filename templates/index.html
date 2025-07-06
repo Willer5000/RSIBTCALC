@@ -352,5 +352,23 @@
             });
         }
     </script>
+<script>
+    // Verificar si los datos están completos
+    function checkDataCompleteness() {
+        fetch('/data_status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.progress && data.progress.complete) {
+                    // Recargar para mostrar datos completos
+                    location.reload();
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }
+    
+    // Verificar cada 30 segundos si hay datos completos
+    setInterval(checkDataCompleteness, 30000);
+</script>
+    
 </body>
 </html>

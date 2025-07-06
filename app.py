@@ -53,6 +53,7 @@ last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
 data_ready = False
 data_queue = queue.Queue()
+last_data_attempt = datetime.utcnow()
 
 current_config = {
     'timeframe': ('15m', '1h'),
@@ -81,10 +82,16 @@ def compute_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
+    
+    # Manejo especial para series con menos de 2 elementos
+    if len(up) < 2 or len(down) < 2:
+        return pd.Series([50] * len(series), 0
+    
     ma_up = up.ewm(alpha=1/period, adjust=False).mean()
     ma_down = down.ewm(alpha=1/period, adjust=False).mean()
     rs = ma_up / ma_down
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi, ma_up.iloc[-1] if not ma_up.empty else 0
 
 def fetch_ohlcv(symbol, timeframe, limit=100):
     """Obtiene datos OHLCV del exchange"""
@@ -111,14 +118,14 @@ def calculate_rsi_for_symbol(symbol):
         # Obtener datos para cada timeframe
         for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
             df = fetch_ohlcv(symbol, tf)
-            if df is not None and not df.empty:
-                rsi = compute_rsi(df['close'], current_config['rsi_period'])
+            if df is not None and not df.empty and len(df) > 14:
+                rsi, volume = compute_rsi(df['close'], current_config['rsi_period'])
                 # Usar el último valor disponible, o 50 si no hay datos
                 asset_data[tf] = rsi.iloc[-1] if not rsi.empty else 50
                 
                 # Usar volumen del timeframe de 1h como referencia
                 if tf == '1h':
-                    volumes = df['volume'].tail(24).mean()
+                    volumes = volume
             else:
                 asset_data[tf] = 50
                 volumes = 0
@@ -138,32 +145,30 @@ def calculate_rsi_for_symbol(symbol):
 
 def fetch_all_data():
     """Obtiene y procesa todos los datos de las criptomonedas"""
-    global rsi_data, last_update_time, data_ready
+    global rsi_data, last_update_time, data_ready, last_data_attempt
     
+    last_data_attempt = datetime.utcnow()
     logger.info("Iniciando actualización de datos...")
     start_time = time.time()
     
     try:
         results = []
-        success_count = 0
+        total = len(symbols)
         
-        # Procesar todos los símbolos con manejo de errores robusto
-        for symbol in symbols:
+        # Procesar solo los primeros 5 símbolos para mostrar rápido
+        initial_symbols = symbols[:5]
+        for symbol in initial_symbols:
             try:
-                # Pequeña pausa para evitar rate limits
-                time.sleep(0.3)
-                
                 result = calculate_rsi_for_symbol(symbol)
                 if result:
                     results.append(result)
-                    success_count += 1
                     logger.info(f"Datos de {symbol} obtenidos")
                     
                     # Enviar progreso a la cola
                     data_queue.put({
-                        'progress': success_count,
-                        'total': len(symbols),
-                        'message': f"Obteniendo datos: {success_count}/{len(symbols)}"
+                        'progress': len(results),
+                        'total': len(initial_symbols),
+                        'message': f"Obteniendo datos: {len(results)}/{len(initial_symbols)}"
                     })
             except Exception as e:
                 logger.error(f"Error crítico procesando {symbol}: {str(e)}")
@@ -197,17 +202,73 @@ def fetch_all_data():
                 rsi_data = df
                 last_update_time = datetime.utcnow()
                 data_ready = True
-            logger.info(f"Datos actualizados con éxito. Monedas exitosas: {success_count}/{len(symbols)}")
+            logger.info(f"Datos iniciales actualizados. Monedas: {len(results)}/{len(initial_symbols)}")
+            
+            # Continuar con el resto de los símbolos en segundo plano
+            threading.Thread(target=load_remaining_data, args=(results,)).start()
         else:
             logger.warning("No se obtuvieron datos para ninguna moneda")
-            data_ready = False
+            data_ready = True  # Mostrar aunque esté vacío
     except Exception as e:
         logger.error(f"Error crítico en fetch_all_data: {str(e)}")
-        data_ready = False
+        data_ready = True  # Forzar mostrar aunque haya error
     
     elapsed = time.time() - start_time
-    logger.info(f"Tiempo total de actualización: {elapsed:.2f} segundos")
+    logger.info(f"Tiempo total de actualización inicial: {elapsed:.2f} segundos")
     return data_ready
+
+def load_remaining_data(initial_results):
+    """Carga el resto de los datos en segundo plano"""
+    global rsi_data, last_update_time
+    
+    try:
+        results = initial_results.copy()
+        remaining_symbols = symbols[5:]
+        
+        for symbol in remaining_symbols:
+            try:
+                time.sleep(0.1)  # Pequeña pausa para evitar rate limits
+                result = calculate_rsi_for_symbol(symbol)
+                if result:
+                    results.append(result)
+                    logger.info(f"Datos de {symbol} obtenidos (fondo)")
+            except Exception as e:
+                logger.error(f"Error procesando {symbol} (fondo): {str(e)}")
+                # Añadir datos predeterminados
+                results.append({
+                    'symbol': symbol,
+                    '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
+                    '4h': 50, '1d': 50, '1w': 50,
+                    'volume': 0
+                })
+        
+        if results:
+            df = pd.DataFrame(results)
+            
+            # Calcular categorías de volumen
+            if len(df) > 0:
+                volumes = df['volume'].values
+                if len(volumes) > 0:
+                    high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
+                    low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
+                    df['volume_cat'] = df.apply(lambda row: 
+                        'Alto' if row['volume'] >= high_thresh else 
+                        'Bajo' if row['volume'] <= low_thresh else 
+                        'Medio', axis=1)
+                else:
+                    df['volume_cat'] = ['Medio'] * len(results)
+            else:
+                df['volume_cat'] = ['Medio'] * len(results)
+            
+            with data_lock:
+                rsi_data = df
+                last_update_time = datetime.utcnow()
+            logger.info(f"Datos completos actualizados. Monedas: {len(results)}/{len(symbols)}")
+            
+            # Notificar que los datos completos están listos
+            data_queue.put({'complete': True})
+    except Exception as e:
+        logger.error(f"Error cargando datos restantes: {str(e)}")
 
 def create_plot():
     """Crea el gráfico Plotly"""
@@ -355,7 +416,11 @@ def create_plot():
 # Ruta principal
 @app.route('/')
 def index():
-    global data_ready
+    global data_ready, last_data_attempt
+    
+    # Si han pasado más de 30 segundos desde el último intento y no hay datos, forzar recarga
+    if not data_ready and (datetime.utcnow() - last_data_attempt).total_seconds() > 30:
+        data_ready = True
     
     # Si los datos no están listos, mostrar página de carga
     if not data_ready:

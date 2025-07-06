@@ -9,13 +9,12 @@ import os
 import requests
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
 # Top 60 criptomonedas por capitalización
 symbols = [
-    'bitcoin', 'ethereum', 'binancecoin', 'solana', 
+    'bitcoin', 'ethereum', 'tether', 'binancecoin', 'solana', 
     'ripple', 'cardano', 'dogecoin', 'avalanche-2',
     'polkadot', 'chainlink', 'matic-network', 'shiba-inu',
     'litecoin', 'uniswap', 'cosmos', 'stellar',
@@ -32,13 +31,14 @@ symbols = [
     'waves', 'oasis-network', 'harmony', 'helium'
 ]
 
-# Fuente de datos alternativa
+# Fuente de datos
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 # Variables globales
 rsi_data = pd.DataFrame()
 last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
+data_ready = False  # Bandera para saber si los datos están listos
 
 current_config = {
     'timeframe': ('15m', '1h'),
@@ -52,16 +52,22 @@ current_config = {
 
 # Funciones de cálculo
 def compute_rsi(series, period=14):
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ma_up = up.ewm(com=period-1, adjust=False).mean()
-    ma_down = down.ewm(com=period-1, adjust=False).mean()
-    rs = ma_up / ma_down
-    return 100 - (100 / (1 + rs))
+    """Calcula el RSI para una serie de precios"""
+    try:
+        delta = series.diff()
+        up = delta.clip(lower=0)
+        down = -delta.clip(upper=0)
+        ma_up = up.ewm(com=period-1, adjust=False).mean()
+        ma_down = down.ewm(com=period-1, adjust=False).mean()
+        rs = ma_up / ma_down
+        return 100 - (100 / (1 + rs))
+    except Exception as e:
+        print(f"Error calculando RSI: {e}")
+        return pd.Series([50] * len(series))
 
 # Obtener datos históricos desde CoinGecko
 def get_historical_data(coin_id, days=30):
+    """Obtiene datos históricos para una criptomoneda"""
     try:
         url = f"{COINGECKO_API}/coins/{coin_id}/market_chart"
         params = {
@@ -69,7 +75,8 @@ def get_historical_data(coin_id, days=30):
             'days': days,
             'interval': 'daily'
         }
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, params=params, timeout=60)
+        response.raise_for_status()
         data = response.json()
         
         if 'prices' in data and data['prices']:
@@ -77,12 +84,16 @@ def get_historical_data(coin_id, days=30):
             df['ts'] = pd.to_datetime(df['ts'], unit='ms')
             df.set_index('ts', inplace=True)
             return df
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error en la solicitud para {coin_id}: {e}")
     except Exception as e:
-        print(f"Error obteniendo datos para {coin_id}: {str(e)[:100]}")
+        print(f"Error general obteniendo datos para {coin_id}: {e}")
     return None
 
-# Obtener todos los volúmenes en una sola llamada
+# Obtener volúmenes en una sola llamada
 def fetch_all_volumes():
+    """Obtiene todos los volúmenes en una sola llamada a la API"""
     try:
         url = f"{COINGECKO_API}/coins/markets"
         params = {
@@ -90,106 +101,119 @@ def fetch_all_volumes():
             'ids': ','.join(symbols),
             'per_page': 250
         }
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, params=params, timeout=60)
+        response.raise_for_status()
         data = response.json()
         return {coin['id']: coin['total_volume'] for coin in data}
     except Exception as e:
-        print(f"Error obteniendo volúmenes: {str(e)}")
+        print(f"Error obteniendo volúmenes: {e}")
         return {}
 
 # Calcular RSI para diferentes timeframes
 def calculate_timeframe_rsi(df, timeframe, period=14):
-    # Simular diferentes timeframes con resampling
-    if timeframe == '15m':
-        resampled = df['price'].resample('15T').ohlc().dropna()
-    elif timeframe == '30m':
-        resampled = df['price'].resample('30T').ohlc().dropna()
-    elif timeframe == '1h':
-        resampled = df['price'].resample('1H').ohlc().dropna()
-    elif timeframe == '2h':
-        resampled = df['price'].resample('2H').ohlc().dropna()
-    elif timeframe == '4h':
-        resampled = df['price'].resample('4H').ohlc().dropna()
-    elif timeframe == '1d':
-        resampled = df['price'].resample('1D').ohlc().dropna()
-    elif timeframe == '1w':
-        resampled = df['price'].resample('1W').ohlc().dropna()
-    else:
+    """Calcula el RSI para un timeframe específico"""
+    try:
+        if timeframe == '15m':
+            resampled = df['price'].resample('15T').ohlc().dropna()
+        elif timeframe == '30m':
+            resampled = df['price'].resample('30T').ohlc().dropna()
+        elif timeframe == '1h':
+            resampled = df['price'].resample('1H').ohlc().dropna()
+        elif timeframe == '2h':
+            resampled = df['price'].resample('2H').ohlc().dropna()
+        elif timeframe == '4h':
+            resampled = df['price'].resample('4H').ohlc().dropna()
+        elif timeframe == '1d':
+            resampled = df['price'].resample('1D').ohlc().dropna()
+        elif timeframe == '1w':
+            resampled = df['price'].resample('1W').ohlc().dropna()
+        else:
+            return 50
+        
+        if resampled.empty:
+            return 50
+        
+        rsi = compute_rsi(resampled['close'], period)
+        return rsi.iloc[-1] if not rsi.empty else 50
+    except Exception as e:
+        print(f"Error calculando RSI para timeframe {timeframe}: {e}")
         return 50
-    
-    if resampled.empty:
-        return 50
-    
-    # Calcular RSI para el timeframe
-    rsi = compute_rsi(resampled['close'], period)
-    return rsi.iloc[-1] if not rsi.empty else 50
 
 def fetch_all_data():
-    global rsi_data, last_update_time
+    """Obtiene y procesa todos los datos de las criptomonedas"""
+    global rsi_data, last_update_time, data_ready
     
     print("Iniciando actualización de datos...")
     start_time = time.time()
     
-    # Obtener todos los volúmenes en una sola llamada
-    volumes_map = fetch_all_volumes()
-    
-    # Obtener datos históricos en paralelo
-    results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(get_historical_data, coin_id, 30): coin_id for coin_id in symbols}
+    try:
+        # Obtener todos los volúmenes en una sola llamada
+        volumes_map = fetch_all_volumes()
         
-        for future in as_completed(futures):
-            coin_id = futures[future]
+        rsi_results = []
+        success_count = 0
+        
+        # Procesar cada moneda con un pequeño delay para evitar rate limits
+        for coin_id in symbols:
             try:
-                df = future.result()
-                if df is not None:
-                    results.append((coin_id, df, volumes_map.get(coin_id, 0)))
+                # Pequeña pausa para evitar sobrecargar la API
+                time.sleep(1.2)  # 1.2 segundos entre solicitudes (50/min)
+                
+                df = get_historical_data(coin_id, 30)
+                if df is None or df.empty:
+                    print(f"No se obtuvieron datos para {coin_id}")
+                    continue
+                
+                asset_data = {}
+                for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
+                    asset_data[tf] = calculate_timeframe_rsi(df, tf, current_config['rsi_period'])
+                
+                # Formatear símbolo para mostrar
+                symbol_name = coin_id.upper() if coin_id == 'btc' else coin_id.replace('-', ' ').title()
+                asset_data['symbol'] = f"{symbol_name}/USDT"
+                asset_data['volume'] = volumes_map.get(coin_id, 0)
+                rsi_results.append(asset_data)
+                success_count += 1
+                print(f"Datos de {coin_id} obtenidos")
             except Exception as e:
                 print(f"Error procesando {coin_id}: {e}")
-    
-    rsi_results = []
-    for coin_id, df, volume in results:
-        try:
-            asset_data = {}
-            for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
-                asset_data[tf] = calculate_timeframe_rsi(df, tf, current_config['rsi_period'])
-            
-            # Formatear símbolo para mostrar
-            symbol_name = coin_id.upper() if coin_id == 'btc' else coin_id.replace('-', ' ').title()
-            asset_data['symbol'] = f"{symbol_name}/USDT"
-            asset_data['volume'] = volume
-            rsi_results.append(asset_data)
-        except Exception as e:
-            print(f"Error procesando {coin_id}: {e}")
-    
-    if rsi_results:
-        df = pd.DataFrame(rsi_results)
         
-        # Calcular categorías de volumen
-        if len(df) > 0:
-            volumes = df['volume'].values
-            if len(volumes) > 0:
-                high_thresh = np.percentile(volumes, 70)
-                low_thresh = np.percentile(volumes, 30)
-                df['volume_cat'] = df.apply(lambda row: 
-                    'Alto' if row['volume'] >= high_thresh else 
-                    'Bajo' if row['volume'] <= low_thresh else 
-                    'Medio', axis=1)
+        if rsi_results:
+            df = pd.DataFrame(rsi_results)
+            
+            # Calcular categorías de volumen
+            if len(df) > 0:
+                volumes = df['volume'].values
+                if len(volumes) > 0:
+                    high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
+                    low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
+                    df['volume_cat'] = df.apply(lambda row: 
+                        'Alto' if row['volume'] >= high_thresh else 
+                        'Bajo' if row['volume'] <= low_thresh else 
+                        'Medio', axis=1)
+                else:
+                    df['volume_cat'] = ['Medio'] * len(rsi_results)
             else:
                 df['volume_cat'] = ['Medio'] * len(rsi_results)
+            
+            with data_lock:
+                rsi_data = df
+                last_update_time = datetime.utcnow()
+                data_ready = True
+            print(f"Datos actualizados con éxito. Monedas: {success_count}/{len(symbols)}")
         else:
-            df['volume_cat'] = ['Medio'] * len(rsi_results)
-        
-        with data_lock:
-            rsi_data = df
-            last_update_time = datetime.utcnow()
+            print("No se obtuvieron datos para ninguna moneda")
+            data_ready = False
+    except Exception as e:
+        print(f"Error crítico en fetch_all_data: {e}")
+        data_ready = False
     
     elapsed = time.time() - start_time
-    print(f"Datos actualizados en {elapsed:.2f} segundos")
-    print(f"Criptos obtenidas: {len(rsi_results)}/{len(symbols)}")
-    return True
+    print(f"Tiempo total de actualización: {elapsed:.2f} segundos")
+    return data_ready
 
 def create_plot():
+    """Crea el gráfico Plotly"""
     global rsi_data
     
     # Crear figura
@@ -249,7 +273,7 @@ def create_plot():
                 textfont=textfont,
                 name=name,
                 hoverinfo='text',
-                hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: {row['volume_cat']}"
+                hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: ${row['volume']:,.0f} ({row['volume_cat']})"
             ))
     
     # Añadir trazas a la figura
@@ -324,11 +348,23 @@ def create_plot():
 # Ruta principal
 @app.route('/')
 def index():
+    global data_ready
+    
+    # Si los datos no están listos, mostrar página de carga
+    if not data_ready:
+        return render_template('loading.html')
+    
     fig = create_plot()
     graph_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
     return render_template('index.html', graph_html=graph_html, 
                            current_config=current_config,
                            last_update=last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+# Ruta para forzar actualización
+@app.route('/refresh')
+def refresh():
+    threading.Thread(target=fetch_all_data).start()
+    return jsonify({"status": "Actualización iniciada"})
 
 # API para actualizar configuración
 @app.route('/update_config', methods=['POST'])
@@ -384,24 +420,24 @@ def update_config():
 # Programar actualizaciones periódicas
 scheduler = None
 if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(
-        fetch_all_data, 
-        'interval', 
-        hours=1,
-        max_instances=1
-    )
     try:
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(
+            fetch_all_data, 
+            'interval', 
+            hours=1,
+            max_instances=1
+        )
         scheduler.start()
-        print("Scheduler iniciado")
+        print("Scheduler de actualización iniciado")
     except Exception as e:
         print(f"Error iniciando scheduler: {e}")
 
 # Iniciar la aplicación
 if __name__ == '__main__':
-    # Carga inicial de datos en un hilo separado
-    threading.Thread(target=fetch_all_data).start()
+    # Iniciar la carga de datos
+    data_ready = fetch_all_data()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)

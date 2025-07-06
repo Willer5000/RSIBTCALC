@@ -1,48 +1,44 @@
 from flask import Flask, render_template, jsonify, request
-import ccxt
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.graph_objs as go
 import threading
 import os
+import requests
+import json
 from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
 # Top 60 criptomonedas por capitalización
 symbols = [
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 
-    'XRP/USDT', 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT',
-    'DOT/USDT', 'LINK/USDT', 'MATIC/USDT', 'SHIB/USDT',
-    'LTC/USDT', 'UNI/USDT', 'ATOM/USDT', 'XLM/USDT',
-    'ETC/USDT', 'FIL/USDT', 'APT/USDT', 'ARB/USDT',
-    'NEAR/USDT', 'OP/USDT', 'VET/USDT', 'QNT/USDT',
-    'RUNE/USDT', 'ALGO/USDT', 'GRT/USDT', 'AAVE/USDT',
-    'AXS/USDT', 'XTZ/USDT', 'STX/USDT', 'EGLD/USDT',
-    'THETA/USDT', 'EOS/USDT', 'FLOW/USDT', 'SAND/USDT',
-    'MANA/USDT', 'APE/USDT', 'CRV/USDT', 'KAVA/USDT',
-    'IMX/USDT', 'RNDR/USDT', 'MINA/USDT', 'MKR/USDT',
-    'SNX/USDT', 'COMP/USDT', 'ZEC/USDT', 'DASH/USDT',
-    'ENJ/USDT', 'IOTA/USDT', 'KSM/USDT', 'XMR/USDT',
-    'NEO/USDT', 'GALA/USDT', 'CHZ/USDT', 'LDO/USDT',
-    'WAVES/USDT', 'ROSE/USDT', 'ONE/USDT', 'HNT/USDT'
+    'bitcoin', 'ethereum', 'binancecoin', 'solana', 
+    'ripple', 'cardano', 'dogecoin', 'avalanche-2',
+    'polkadot', 'chainlink', 'matic-network', 'shiba-inu',
+    'litecoin', 'uniswap', 'cosmos', 'stellar',
+    'ethereum-classic', 'filecoin', 'aptos', 'arbitrum',
+    'near', 'optimism', 'vechain', 'quant-network',
+    'thorchain', 'algorand', 'the-graph', 'aave',
+    'axie-infinity', 'tezos', 'stacks', 'elrond-erd-2',
+    'theta-token', 'eos', 'flow', 'the-sandbox',
+    'decentraland', 'apecoin', 'curve-dao-token', 'kava',
+    'immutable-x', 'render-token', 'mina-protocol', 'maker',
+    'havven', 'compound-governance-token', 'zcash', 'dash',
+    'enjincoin', 'iota', 'kusama', 'monero',
+    'neo', 'gala', 'chiliz', 'lido-dao',
+    'waves', 'oasis-network', 'harmony', 'helium'
 ]
 
-# Configuración de exchange con proxies alternativos
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'timeout': 30000,
-    'proxies': {
-        'https': 'https://crypto-proxy.sirius.com:1080',  # Proxy alternativo
-    }
-})
+# Fuente de datos alternativa
+COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 # Variables globales
 rsi_data = pd.DataFrame()
 last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
+cached_data = None
 
 current_config = {
     'timeframe': ('15m', '1h'),
@@ -54,6 +50,32 @@ current_config = {
     'upper_y': 70
 }
 
+# Cargar datos de caché desde archivo
+def load_cache():
+    global cached_data
+    try:
+        with open('data_cache.json', 'r') as f:
+            cached_data = json.load(f)
+        print("Datos de caché cargados exitosamente")
+    except:
+        print("No se encontró caché, creando nueva")
+        cached_data = {
+            'rsi_data': [],
+            'last_update': datetime.utcnow().isoformat()
+        }
+
+# Guardar datos en caché
+def save_cache():
+    with data_lock:
+        data_to_cache = {
+            'rsi_data': rsi_data.to_dict(orient='records'),
+            'last_update': last_update_time.isoformat()
+        }
+    
+    with open('data_cache.json', 'w') as f:
+        json.dump(data_to_cache, f)
+    print("Datos guardados en caché")
+
 # Funciones de cálculo
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -64,29 +86,63 @@ def compute_rsi(series, period=14):
     rs = ma_up / ma_down
     return 100 - (100 / (1 + rs))
 
-def fetch_ohlcv(symbol, timeframe, lookback=30, max_retries=3):
-    retries = 0
-    while retries < max_retries:
-        try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
-            if not ohlcv:
-                return None
-            df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','vol'])
-            df['close'] = df['close'].astype(float)
-            df['vol'] = df['vol'].astype(float)
+# Obtener datos históricos desde CoinGecko
+def get_historical_data(coin_id, days=30):
+    try:
+        url = f"{COINGECKO_API}/coins/{coin_id}/market_chart"
+        params = {
+            'vs_currency': 'usd',
+            'days': days,
+            'interval': 'daily'
+        }
+        response = requests.get(url, params=params, timeout=30)
+        data = response.json()
+        
+        if 'prices' in data and data['prices']:
+            df = pd.DataFrame(data['prices'], columns=['ts', 'price'])
+            df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+            df.set_index('ts', inplace=True)
             return df
-        except Exception as e:
-            print(f"Error fetching {symbol} {timeframe} (intento {retries+1}): {str(e)[:100]}")
-            retries += 1
-            time.sleep(1)
+    except Exception as e:
+        print(f"Error obteniendo datos para {coin_id}: {str(e)[:100]}")
     return None
 
-def calculate_volume_category(volumes):
-    if len(volumes) == 0:
-        return []
-    high_thresh = np.percentile(volumes, 70)
-    low_thresh = np.percentile(volumes, 30)
-    return ['Alto' if vol >= high_thresh else 'Bajo' if vol <= low_thresh else 'Medio' for vol in volumes]
+# Obtener volumen de trading
+def get_volume(coin_id):
+    try:
+        url = f"{COINGECKO_API}/coins/{coin_id}"
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        return data['market_data']['total_volume']['usd']
+    except:
+        return 0
+
+# Calcular RSI para diferentes timeframes
+def calculate_timeframe_rsi(df, timeframe, period=14):
+    # Simular diferentes timeframes con resampling
+    if timeframe == '15m':
+        resampled = df['price'].resample('15T').ohlc().dropna()
+    elif timeframe == '30m':
+        resampled = df['price'].resample('30T').ohlc().dropna()
+    elif timeframe == '1h':
+        resampled = df['price'].resample('1H').ohlc().dropna()
+    elif timeframe == '2h':
+        resampled = df['price'].resample('2H').ohlc().dropna()
+    elif timeframe == '4h':
+        resampled = df['price'].resample('4H').ohlc().dropna()
+    elif timeframe == '1d':
+        resampled = df['price'].resample('1D').ohlc().dropna()
+    elif timeframe == '1w':
+        resampled = df['price'].resample('1W').ohlc().dropna()
+    else:
+        return 50
+    
+    if resampled.empty:
+        return 50
+    
+    # Calcular RSI para el timeframe
+    rsi = compute_rsi(resampled['close'], period)
+    return rsi.iloc[-1] if not rsi.empty else 50
 
 def fetch_all_data():
     global rsi_data, last_update_time
@@ -99,82 +155,66 @@ def fetch_all_data():
     try:
         # Obtener datos para BTC primero
         btc_data = {}
-        volume_set = False
+        btc_df = get_historical_data('bitcoin', 30)
+        volume = get_volume('bitcoin')
         
-        for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
-            df = fetch_ohlcv('BTC/USDT', tf)
-            if df is not None and not df.empty:
-                rsi_series = compute_rsi(df['close'], period=current_config['rsi_period'])
-                if not rsi_series.empty:
-                    btc_data[tf] = rsi_series.iloc[-1]
-                else:
-                    btc_data[tf] = 50  # Valor por defecto
-                if tf == '1h':
-                    btc_data['volume'] = df['vol'].mean()
-                    volume_set = True
+        if btc_df is not None:
+            for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
+                btc_data[tf] = calculate_timeframe_rsi(btc_df, tf, current_config['rsi_period'])
         
         btc_data['symbol'] = 'BTC/USDT'
+        btc_data['volume'] = volume
         rsi_results.append(btc_data)
-        
-        if volume_set:
-            volume_results.append(btc_data['volume'])
-        else:
-            print("Advertencia: No se pudo obtener volumen para BTC/USDT")
+        volume_results.append(volume)
+        print(f"Datos de BTC obtenidos")
     except Exception as e:
         print(f"Error procesando BTC: {e}")
     
     # Obtener datos para altcoins
-    for sym in symbols:
-        if sym == 'BTC/USDT':
+    for coin_id in symbols:
+        if coin_id == 'bitcoin':
             continue
             
         try:
             asset_data = {}
-            volume_set = False
-            timeframes = set(['15m', '30m', '1h', '2h', '4h', '1d', '1w'])
+            coin_df = get_historical_data(coin_id, 30)
+            volume = get_volume(coin_id)
             
-            for tf in timeframes:
-                df = fetch_ohlcv(sym, tf)
-                if df is not None and not df.empty:
-                    rsi_series = compute_rsi(df['close'], period=current_config['rsi_period'])
-                    if not rsi_series.empty:
-                        asset_data[tf] = rsi_series.iloc[-1]
-                    else:
-                        asset_data[tf] = 50  # Valor por defecto
-                    if tf == '1h':
-                        asset_data['volume'] = df['vol'].mean()
-                        volume_set = True
-                time.sleep(0.1)
+            if coin_df is not None:
+                for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
+                    asset_data[tf] = calculate_timeframe_rsi(coin_df, tf, current_config['rsi_period'])
             
-            asset_data['symbol'] = sym
+            # Formatear símbolo para mostrar
+            symbol_name = coin_id.upper() if coin_id == 'btc' else coin_id.replace('-', ' ').title()
+            asset_data['symbol'] = f"{symbol_name}/USDT"
+            asset_data['volume'] = volume
             rsi_results.append(asset_data)
-            
-            if volume_set:
-                volume_results.append(asset_data['volume'])
-            else:
-                print(f"Advertencia: No se pudo obtener volumen para {sym}")
+            volume_results.append(volume)
+            print(f"Datos de {coin_id} obtenidos")
+            time.sleep(0.5)  # Respetar rate limit
         except Exception as e:
-            print(f"Error procesando {sym}: {e}")
+            print(f"Error procesando {coin_id}: {e}")
     
     if rsi_results:
         df = pd.DataFrame(rsi_results)
-        if len(volume_results) > 0:
-            df['volume_cat'] = calculate_volume_category(volume_results)
+        
+        # Calcular categorías de volumen
+        if volume_results:
+            high_thresh = np.percentile(volume_results, 70)
+            low_thresh = np.percentile(volume_results, 30)
+            df['volume_cat'] = df.apply(lambda row: 
+                'Alto' if row['volume'] >= high_thresh else 
+                'Bajo' if row['volume'] <= low_thresh else 
+                'Medio', axis=1)
         else:
             df['volume_cat'] = ['Medio'] * len(rsi_results)
-        
-        # Asegurar que BTC está presente
-        if 'BTC/USDT' not in df['symbol'].values:
-            btc_row = pd.DataFrame([{
-                'symbol': 'BTC/USDT',
-                'volume_cat': 'Alto',
-                **{tf: 50 for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']}
-            }])
-            df = pd.concat([df, btc_row], ignore_index=True)
         
         with data_lock:
             rsi_data = df
             last_update_time = datetime.utcnow()
+        
+        # Guardar en caché
+        save_cache()
     
     elapsed = time.time() - start_time
     print(f"Datos actualizados en {elapsed:.2f} segundos")
@@ -182,45 +222,52 @@ def fetch_all_data():
     return True
 
 def create_plot():
-    with data_lock:
-        plot_data = rsi_data.copy()
-        config = current_config.copy()
+    global rsi_data
     
-    # Crear figura incluso si no hay datos
+    # Intentar cargar datos si están vacíos
+    if rsi_data.empty:
+        load_cache()
+        if cached_data and cached_data['rsi_data']:
+            rsi_data = pd.DataFrame(cached_data['rsi_data'])
+            last_update_time = datetime.fromisoformat(cached_data['last_update'])
+    
+    # Crear figura
     fig = go.Figure()
     
-    if plot_data.empty:
-        fig.add_annotation(text="Cargando datos...", x=0.5, y=0.5, showarrow=False, font=dict(size=24))
+    if rsi_data.empty:
+        fig.add_annotation(
+            text="No se pudieron cargar datos. Intente actualizar más tarde.",
+            x=0.5, y=0.5, 
+            showarrow=False, 
+            font=dict(size=24, color="red")
+        )
         fig.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            height=700
         )
         return fig
     
     # Filtrar datos
-    if config['volume_filter'] != 'Todas':
-        plot_data = plot_data[plot_data['volume_cat'] == config['volume_filter']]
-    
-    # Asegurar BTC está presente
-    btc_row = plot_data[plot_data['symbol'] == 'BTC/USDT']
-    if not btc_row.empty and 'BTC/USDT' not in plot_data['symbol'].values:
-        plot_data = pd.concat([plot_data, btc_row])
+    plot_data = rsi_data.copy()
+    if current_config['volume_filter'] != 'Todas':
+        plot_data = plot_data[plot_data['volume_cat'] == current_config['volume_filter']]
     
     # Obtener ejes
-    x_time, y_time = config['timeframe']
+    x_time, y_time = current_config['timeframe']
     
     # Crear trazas
     traces = []
     for i, row in plot_data.iterrows():
         symbol = row['symbol']
-        color = 'gold' if symbol == 'BTC/USDT' else \
+        color = 'gold' if 'BTC' in symbol else \
                 'green' if row['volume_cat'] == 'Alto' else \
                 'blue' if row['volume_cat'] == 'Medio' else 'red'
         
-        size = 50 if symbol == 'BTC/USDT' else 30
+        size = 50 if 'BTC' in symbol else 30
         name = symbol.split('/')[0]
         
-        if symbol == 'BTC/USDT':
+        if 'BTC' in symbol:
             textfont = dict(size=18, color='darkorange', family='Arial', weight='bold')
         else:
             textfont = dict(size=14, color='black', weight='bold')
@@ -248,41 +295,41 @@ def create_plot():
     fig = go.Figure(data=traces)
     
     # Añadir líneas de referencia
-    fig.add_shape(type="line", x0=config['lower_x'], y0=0, x1=config['lower_x'], y1=100,
-                line=dict(color="Green", width=3, dash="dash"))
-    fig.add_shape(type="line", x0=config['upper_x'], y0=0, x1=config['upper_x'], y1=100,
-                line=dict(color="Red", width=3, dash="dash"))
-    fig.add_shape(type="line", x0=0, y0=config['lower_y'], x1=100, y1=config['lower_y'],
-                line=dict(color="Green", width=3, dash="dash"))
-    fig.add_shape(type="line", x0=0, y0=config['upper_y'], x1=100, y1=config['upper_y'],
-                line=dict(color="Red", width=3, dash="dash"))
+    fig.add_shape(type="line", 
+                  x0=current_config['lower_x'], y0=0, 
+                  x1=current_config['lower_x'], y1=100,
+                  line=dict(color="Green", width=3, dash="dash"))
+    fig.add_shape(type="line", 
+                  x0=current_config['upper_x'], y0=0, 
+                  x1=current_config['upper_x'], y1=100,
+                  line=dict(color="Red", width=3, dash="dash"))
+    fig.add_shape(type="line", 
+                  x0=0, y0=current_config['lower_y'], 
+                  x1=100, y1=current_config['lower_y'],
+                  line=dict(color="Green", width=3, dash="dash"))
+    fig.add_shape(type="line", 
+                  x0=0, y0=current_config['upper_y'], 
+                  x1=100, y1=current_config['upper_y'],
+                  line=dict(color="Red", width=3, dash="dash"))
     
     # Añadir zonas
-    fig.add_hrect(
-        y0=config['upper_y'], y1=100,
-        line_width=0, fillcolor="red", opacity=0.15
-    )
-    fig.add_hrect(
-        y0=0, y1=config['lower_y'],
-        line_width=0, fillcolor="green", opacity=0.15
-    )
-    fig.add_vrect(
-        x0=config['upper_x'], x1=100,
-        line_width=0, fillcolor="red", opacity=0.15
-    )
-    fig.add_vrect(
-        x0=0, x1=config['lower_x'],
-        line_width=0, fillcolor="green", opacity=0.15
-    )
+    fig.add_hrect(y0=current_config['upper_y'], y1=100,
+                  line_width=0, fillcolor="red", opacity=0.15)
+    fig.add_hrect(y0=0, y1=current_config['lower_y'],
+                  line_width=0, fillcolor="green", opacity=0.15)
+    fig.add_vrect(x0=current_config['upper_x'], x1=100,
+                  line_width=0, fillcolor="red", opacity=0.15)
+    fig.add_vrect(x0=0, x1=current_config['lower_x'],
+                  line_width=0, fillcolor="green", opacity=0.15)
     
     # Configurar layout
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M (UTC)")
-    title = f"RSI ({config['timeframe'][0]} vs {config['timeframe'][1]}) | Período: {config['rsi_period']} | Filtro: {config['volume_filter']}"
+    title = f"RSI ({current_config['timeframe'][0]} vs {current_config['timeframe'][1]}) | Período: {current_config['rsi_period']} | Filtro: {current_config['volume_filter']}"
     
     fig.update_layout(
         title=dict(text=f"{title}<br>{now}", font=dict(size=24)),
-        xaxis_title=f"RSI {config['timeframe'][0]} (Límites: {config['lower_x']}/{config['upper_x']})",
-        yaxis_title=f"RSI {config['timeframe'][1]} (Límites: {config['lower_y']}/{config['upper_y']})",
+        xaxis_title=f"RSI {current_config['timeframe'][0]} (Límites: {current_config['lower_x']}/{current_config['upper_x']})",
+        yaxis_title=f"RSI {current_config['timeframe'][1]} (Límites: {current_config['lower_y']}/{current_config['upper_y']})",
         xaxis=dict(
             range=[0, 100],
             tickmode='array',
@@ -307,7 +354,7 @@ def create_plot():
         ),
         template="plotly_white",
         showlegend=False,
-        height=800,
+        height=700,
         margin=dict(l=80, r=80, b=100, t=120, pad=20)
     )
     
@@ -361,7 +408,7 @@ def update_config():
     
     # Forzar recálculo si se cambió periodo o timeframe
     if param in ['timeframe', 'period']:
-        fetch_all_data()
+        threading.Thread(target=fetch_all_data).start()
     
     # Crear nuevo gráfico
     fig = create_plot()
@@ -373,18 +420,20 @@ def update_config():
         'last_update': last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     })
 
-# Programar actualizaciones periódicas con reintentos
+# Programar actualizaciones periódicas
 scheduler = BackgroundScheduler()
 scheduler.add_job(
     fetch_all_data, 
     'interval', 
-    minutes=5,
-    max_instances=2,  # Permitir 2 instancias simultáneas
-    misfire_grace_time=300  # Tolerancia de 5 minutos
+    hours=1,  # Actualizar cada hora para no saturar CoinGecko
+    max_instances=1
 )
 
 # Iniciar la aplicación
 if __name__ == '__main__':
+    # Cargar caché inicial
+    load_cache()
+    
     # Carga inicial de datos
     fetch_all_data()
     

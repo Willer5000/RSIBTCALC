@@ -3,10 +3,11 @@ import ccxt
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.graph_objs as go
-import threading
 import os
+import threading
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
@@ -37,6 +38,9 @@ exchange = ccxt.binance({
 
 # Variables globales
 rsi_data = pd.DataFrame()
+last_update_time = datetime.utcnow()
+data_lock = threading.Lock()
+
 current_config = {
     'timeframe': ('15m', '1h'),
     'volume_filter': 'Todas',
@@ -46,7 +50,6 @@ current_config = {
     'lower_y': 30,
     'upper_y': 70
 }
-last_update_time = datetime.utcnow()
 
 # Funciones de cálculo
 def compute_rsi(series, period=14):
@@ -87,8 +90,8 @@ def fetch_all_data():
     rsi_results = []
     volume_results = []
     
-    # Obtener datos para BTC primero
     try:
+        # Obtener datos para BTC primero
         btc_data = {}
         for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
             df = fetch_ohlcv('BTC/USDT', tf)
@@ -109,7 +112,6 @@ def fetch_all_data():
             
         try:
             asset_data = {}
-            # Solo obtener los timeframes necesarios
             timeframes = set(['15m', '30m', '1h', '2h', '4h', '1d', '1w'])
             for tf in timeframes:
                 df = fetch_ohlcv(sym, tf)
@@ -141,31 +143,37 @@ def fetch_all_data():
                 **{tf: 50 for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']}
             }])], ignore_index=True)
         
-        rsi_data = df
+        with data_lock:
+            rsi_data = df
+            last_update_time = datetime.utcnow()
     
     elapsed = time.time() - start_time
-    last_update_time = datetime.utcnow()
     print(f"Datos actualizados en {elapsed:.2f} segundos")
-    print(f"Criptos obtenidas: {len(rsi_data)}/{len(symbols)}")
+    print(f"Criptos obtenidas: {len(rsi_results)}/{len(symbols)}")
     return True
 
 def create_plot():
-    if rsi_data.empty:
-        return go.Figure()
+    with data_lock:
+        plot_data = rsi_data.copy()
+        config = current_config.copy()
+        last_update = last_update_time
+    
+    if plot_data.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="Cargando datos...", x=0.5, y=0.5, showarrow=False, font=dict(size=24))
+        return fig
     
     # Filtrar datos
-    if current_config['volume_filter'] != 'Todas':
-        plot_data = rsi_data[rsi_data['volume_cat'] == current_config['volume_filter']]
-    else:
-        plot_data = rsi_data
+    if config['volume_filter'] != 'Todas':
+        plot_data = plot_data[plot_data['volume_cat'] == config['volume_filter']]
     
     # Asegurar BTC está presente
-    btc_row = rsi_data[rsi_data['symbol'] == 'BTC/USDT']
+    btc_row = plot_data[plot_data['symbol'] == 'BTC/USDT']
     if not btc_row.empty and 'BTC/USDT' not in plot_data['symbol'].values:
         plot_data = pd.concat([plot_data, btc_row])
     
     # Obtener ejes
-    x_time, y_time = current_config['timeframe']
+    x_time, y_time = config['timeframe']
     
     # Crear trazas
     traces = []
@@ -175,11 +183,9 @@ def create_plot():
                 'green' if row['volume_cat'] == 'Alto' else \
                 'blue' if row['volume_cat'] == 'Medio' else 'red'
         
-        # Tamaños aumentados para mejor visibilidad
         size = 50 if symbol == 'BTC/USDT' else 30
         name = symbol.split('/')[0]
         
-        # Configurar estilo de texto
         if symbol == 'BTC/USDT':
             textfont = dict(size=18, color='darkorange', family='Arial', weight='bold')
         else:
@@ -205,42 +211,42 @@ def create_plot():
     # Crear figura
     fig = go.Figure(data=traces)
     
-    # Añadir líneas de referencia más gruesas
-    fig.add_shape(type="line", x0=current_config['lower_x'], y0=0, x1=current_config['lower_x'], y1=100,
+    # Añadir líneas de referencia
+    fig.add_shape(type="line", x0=config['lower_x'], y0=0, x1=config['lower_x'], y1=100,
                   line=dict(color="Green", width=3, dash="dash"))
-    fig.add_shape(type="line", x0=current_config['upper_x'], y0=0, x1=current_config['upper_x'], y1=100,
+    fig.add_shape(type="line", x0=config['upper_x'], y0=0, x1=config['upper_x'], y1=100,
                   line=dict(color="Red", width=3, dash="dash"))
-    fig.add_shape(type="line", x0=0, y0=current_config['lower_y'], x1=100, y1=current_config['lower_y'],
+    fig.add_shape(type="line", x0=0, y0=config['lower_y'], x1=100, y1=config['lower_y'],
                   line=dict(color="Green", width=3, dash="dash"))
-    fig.add_shape(type="line", x0=0, y0=current_config['upper_y'], x1=100, y1=current_config['upper_y'],
+    fig.add_shape(type="line", x0=0, y0=config['upper_y'], x1=100, y1=config['upper_y'],
                   line=dict(color="Red", width=3, dash="dash"))
     
-    # Añadir zonas de sobrecompra/sobreventa más visibles
+    # Añadir zonas
     fig.add_hrect(
-        y0=current_config['upper_y'], y1=100,
+        y0=config['upper_y'], y1=100,
         line_width=0, fillcolor="red", opacity=0.15
     )
     fig.add_hrect(
-        y0=0, y1=current_config['lower_y'],
+        y0=0, y1=config['lower_y'],
         line_width=0, fillcolor="green", opacity=0.15
     )
     fig.add_vrect(
-        x0=current_config['upper_x'], x1=100,
+        x0=config['upper_x'], x1=100,
         line_width=0, fillcolor="red", opacity=0.15
     )
     fig.add_vrect(
-        x0=0, x1=current_config['lower_x'],
+        x0=0, x1=config['lower_x'],
         line_width=0, fillcolor="green", opacity=0.15
     )
     
     # Configurar layout
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M (UTC)")
-    title = f"RSI ({current_config['timeframe'][0]} vs {current_config['timeframe'][1]}) | Período: {current_config['rsi_period']} | Filtro: {current_config['volume_filter']}"
+    title = f"RSI ({config['timeframe'][0]} vs {config['timeframe'][1]}) | Período: {config['rsi_period']} | Filtro: {config['volume_filter']}"
     
     fig.update_layout(
         title=dict(text=f"{title}<br>{now}", font=dict(size=24)),
-        xaxis_title=f"RSI {current_config['timeframe'][0]} (Límites: {current_config['lower_x']}/{current_config['upper_x']})",
-        yaxis_title=f"RSI {current_config['timeframe'][1]} (Límites: {current_config['lower_y']}/{current_config['upper_y']})",
+        xaxis_title=f"RSI {config['timeframe'][0]} (Límites: {config['lower_x']}/{config['upper_x']})",
+        yaxis_title=f"RSI {config['timeframe'][1]} (Límites: {config['lower_y']}/{config['upper_y']})",
         xaxis=dict(
             range=[0, 100],
             tickmode='array',
@@ -283,8 +289,6 @@ def index():
 # API para actualizar configuración
 @app.route('/update_config', methods=['POST'])
 def update_config():
-    global current_config, last_update_time
-    
     data = request.get_json()
     param = data.get('param')
     value = data.get('value')
@@ -298,22 +302,30 @@ def update_config():
         '1d_1w': ('1d', '1w')
     }
     
-    if param == 'timeframe':
-        current_config[param] = timeframe_map.get(value, ('15m', '1h'))
+    with data_lock:
+        config = current_config.copy()
+        
+        if param == 'timeframe':
+            config['timeframe'] = timeframe_map.get(value, ('15m', '1h'))
+        elif param == 'volume_filter':
+            config['volume_filter'] = value
+        elif param == 'period':
+            config['rsi_period'] = int(value)
+        elif param == 'lower_x':
+            config['lower_x'] = int(value)
+        elif param == 'upper_x':
+            config['upper_x'] = int(value)
+        elif param == 'lower_y':
+            config['lower_y'] = int(value)
+        elif param == 'upper_y':
+            config['upper_y'] = int(value)
+        
+        # Actualizar config global
+        current_config.update(config)
+    
+    # Forzar recálculo si se cambió periodo o timeframe
+    if param in ['timeframe', 'period']:
         fetch_all_data()
-    elif param == 'volume_filter':
-        current_config[param] = value
-    elif param == 'rsi_period':
-        current_config[param] = int(value)
-        fetch_all_data()
-    elif param == 'lower_x':
-        current_config[param] = int(value)
-    elif param == 'upper_x':
-        current_config[param] = int(value)
-    elif param == 'lower_y':
-        current_config[param] = int(value)
-    elif param == 'upper_y':
-        current_config[param] = int(value)
     
     # Crear nuevo gráfico
     fig = create_plot()
@@ -325,26 +337,16 @@ def update_config():
         'last_update': last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     })
 
-# Función para actualizar datos en segundo plano usando threading
-def background_update():
-    while True:
-        try:
-            fetch_all_data()
-            time.sleep(300)  # Actualizar cada 5 minutos
-        except Exception as e:
-            print(f"Error en actualización automática: {e}")
-            time.sleep(60)
+# Programar actualizaciones periódicas
+scheduler = BackgroundScheduler()
+scheduler.add_job(fetch_all_data, 'interval', minutes=5)
+scheduler.start()
 
 # Iniciar la aplicación
 if __name__ == '__main__':
     # Carga inicial de datos
     fetch_all_data()
     
-    # Iniciar hilo de actualización
-    t = threading.Thread(target=background_update)
-    t.daemon = True
-    t.start()
-    
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)

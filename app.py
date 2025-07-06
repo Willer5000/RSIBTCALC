@@ -9,7 +9,6 @@ import os
 import requests
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import ccxt
 
@@ -19,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configuración de exchange
-exchange = ccxt.binance({
+# Configuración de exchange - Usamos KuCoin que es más global
+exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'timeout': 30000,
     'options': {
@@ -137,18 +136,19 @@ def fetch_all_data():
     
     try:
         results = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(calculate_rsi_for_symbol, symbol): symbol for symbol in symbols}
-            
-            for future in as_completed(futures):
-                symbol = futures[future]
-                try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
-                        logger.info(f"Datos de {symbol} obtenidos")
-                except Exception as e:
-                    logger.error(f"Error procesando {symbol}: {str(e)}")
+        
+        # Procesar cada símbolo con un pequeño retraso para evitar rate limits
+        for symbol in symbols:
+            try:
+                # Pequeña pausa para evitar sobrecargar la API
+                time.sleep(0.5)
+                
+                result = calculate_rsi_for_symbol(symbol)
+                if result:
+                    results.append(result)
+                    logger.info(f"Datos de {symbol} obtenidos")
+            except Exception as e:
+                logger.error(f"Error procesando {symbol}: {str(e)}")
         
         if results:
             df = pd.DataFrame(results)
@@ -380,7 +380,7 @@ def update_config():
         # Actualizar config global
         current_config.update(config)
     
-    # Forzar recálculo si se cambió periodo o timeframe
+    # Forzar recálculo si se cambió periodo
     if need_data_reload:
         threading.Thread(target=fetch_all_data).start()
     

@@ -30,14 +30,12 @@ symbols = [
     'WAVES/USDT', 'ROSE/USDT', 'ONE/USDT', 'HNT/USDT'
 ]
 
-# Configuración de exchange con dominio alternativo
+# Configuración de exchange con proxies alternativos
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'timeout': 30000,
-    'urls': {
-        'api': {
-            'public': 'https://api.binance.me/api/v3'  # Dominio alternativo
-        }
+    'proxies': {
+        'https': 'https://crypto-proxy.sirius.com:1080',  # Proxy alternativo
     }
 })
 
@@ -66,19 +64,22 @@ def compute_rsi(series, period=14):
     rs = ma_up / ma_down
     return 100 - (100 / (1 + rs))
 
-def fetch_ohlcv(symbol, timeframe, lookback=30):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
-        if not ohlcv:
-            return None
-        df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','vol'])
-        df['close'] = df['close'].astype(float)
-        df['vol'] = df['vol'].astype(float)
-        return df
-    except Exception as e:
-        print(f"Error fetching {symbol} {timeframe}: {str(e)[:100]}")
-        time.sleep(1)
-        return None
+def fetch_ohlcv(symbol, timeframe, lookback=30, max_retries=3):
+    retries = 0
+    while retries < max_retries:
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
+            if not ohlcv:
+                return None
+            df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','vol'])
+            df['close'] = df['close'].astype(float)
+            df['vol'] = df['vol'].astype(float)
+            return df
+        except Exception as e:
+            print(f"Error fetching {symbol} {timeframe} (intento {retries+1}): {str(e)[:100]}")
+            retries += 1
+            time.sleep(1)
+    return None
 
 def calculate_volume_category(volumes):
     if len(volumes) == 0:
@@ -98,12 +99,16 @@ def fetch_all_data():
     try:
         # Obtener datos para BTC primero
         btc_data = {}
-        volume_set = False  # Bandera para controlar si se estableció el volumen
+        volume_set = False
         
         for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
             df = fetch_ohlcv('BTC/USDT', tf)
-            if df is not None:
-                btc_data[tf] = compute_rsi(df['close'], period=current_config['rsi_period']).iloc[-1]
+            if df is not None and not df.empty:
+                rsi_series = compute_rsi(df['close'], period=current_config['rsi_period'])
+                if not rsi_series.empty:
+                    btc_data[tf] = rsi_series.iloc[-1]
+                else:
+                    btc_data[tf] = 50  # Valor por defecto
                 if tf == '1h':
                     btc_data['volume'] = df['vol'].mean()
                     volume_set = True
@@ -111,7 +116,6 @@ def fetch_all_data():
         btc_data['symbol'] = 'BTC/USDT'
         rsi_results.append(btc_data)
         
-        # Solo agregar volumen si se estableció
         if volume_set:
             volume_results.append(btc_data['volume'])
         else:
@@ -131,8 +135,12 @@ def fetch_all_data():
             
             for tf in timeframes:
                 df = fetch_ohlcv(sym, tf)
-                if df is not None:
-                    asset_data[tf] = compute_rsi(df['close'], period=current_config['rsi_period']).iloc[-1]
+                if df is not None and not df.empty:
+                    rsi_series = compute_rsi(df['close'], period=current_config['rsi_period'])
+                    if not rsi_series.empty:
+                        asset_data[tf] = rsi_series.iloc[-1]
+                    else:
+                        asset_data[tf] = 50  # Valor por defecto
                     if tf == '1h':
                         asset_data['volume'] = df['vol'].mean()
                         volume_set = True
@@ -154,7 +162,6 @@ def fetch_all_data():
             df['volume_cat'] = calculate_volume_category(volume_results)
         else:
             df['volume_cat'] = ['Medio'] * len(rsi_results)
-            print("Advertencia: Usando categorías de volumen por defecto")
         
         # Asegurar que BTC está presente
         if 'BTC/USDT' not in df['symbol'].values:
@@ -178,11 +185,16 @@ def create_plot():
     with data_lock:
         plot_data = rsi_data.copy()
         config = current_config.copy()
-        last_update = last_update_time
+    
+    # Crear figura incluso si no hay datos
+    fig = go.Figure()
     
     if plot_data.empty:
-        fig = go.Figure()
         fig.add_annotation(text="Cargando datos...", x=0.5, y=0.5, showarrow=False, font=dict(size=24))
+        fig.update_layout(
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+        )
         return fig
     
     # Filtrar datos
@@ -213,35 +225,37 @@ def create_plot():
         else:
             textfont = dict(size=14, color='black', weight='bold')
         
-        traces.append(go.Scatter(
-            x=[row[x_time]],
-            y=[row[y_time]],
-            mode='markers+text',
-            marker=dict(
-                size=size,
-                color=color,
-                line=dict(width=2, color='black')
-            ),
-            text=name,
-            textposition='top center',
-            textfont=textfont,
-            name=name,
-            hoverinfo='text',
-            hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: {row['volume_cat']}"
-        ))
+        # Verificar si existen los valores RSI
+        if x_time in row and y_time in row and not pd.isna(row[x_time]) and not pd.isna(row[y_time]):
+            traces.append(go.Scatter(
+                x=[row[x_time]],
+                y=[row[y_time]],
+                mode='markers+text',
+                marker=dict(
+                    size=size,
+                    color=color,
+                    line=dict(width=2, color='black')
+                ),
+                text=name,
+                textposition='top center',
+                textfont=textfont,
+                name=name,
+                hoverinfo='text',
+                hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: {row['volume_cat']}"
+            ))
     
-    # Crear figura
+    # Añadir trazas a la figura
     fig = go.Figure(data=traces)
     
     # Añadir líneas de referencia
     fig.add_shape(type="line", x0=config['lower_x'], y0=0, x1=config['lower_x'], y1=100,
-                  line=dict(color="Green", width=3, dash="dash"))
+                line=dict(color="Green", width=3, dash="dash"))
     fig.add_shape(type="line", x0=config['upper_x'], y0=0, x1=config['upper_x'], y1=100,
-                  line=dict(color="Red", width=3, dash="dash"))
+                line=dict(color="Red", width=3, dash="dash"))
     fig.add_shape(type="line", x0=0, y0=config['lower_y'], x1=100, y1=config['lower_y'],
-                  line=dict(color="Green", width=3, dash="dash"))
+                line=dict(color="Green", width=3, dash="dash"))
     fig.add_shape(type="line", x0=0, y0=config['upper_y'], x1=100, y1=config['upper_y'],
-                  line=dict(color="Red", width=3, dash="dash"))
+                line=dict(color="Red", width=3, dash="dash"))
     
     # Añadir zonas
     fig.add_hrect(

@@ -61,29 +61,18 @@
     <div class="loader-container">
         <div class="spinner"></div>
         <h1>Cargando datos de criptomonedas</h1>
-        <div class="status">Por favor espere, esto puede tardar hasta 2 minutos...</div>
+        <div class="status">Por favor espere, esto puede tardar hasta 1 minuto...</div>
         <div class="info">
-            <p>Estamos obteniendo los datos más recientes de CoinGecko</p>
+            <p>Estamos obteniendo los datos más recientes de Binance</p>
             <p>La página se actualizará automáticamente cuando los datos estén listos</p>
         </div>
     </div>
 
     <script>
-        // Intentar recargar cada 15 segundos
+        // Intentar recargar cada 10 segundos
         setTimeout(() => {
             location.reload();
-        }, 15000);
-        
-        // Verificar estado cada 5 segundos
-        setInterval(() => {
-            fetch('/refresh')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === "Actualización iniciada") {
-                        console.log("Actualización en curso...");
-                    }
-                });
-        }, 5000);
+        }, 10000);
     </script>
 </body>
 </html>

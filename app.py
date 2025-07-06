@@ -3,10 +3,10 @@ import ccxt
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import plotly.graph_objs as go
-import os
 import threading
+import os
 from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
@@ -30,10 +30,15 @@ symbols = [
     'WAVES/USDT', 'ROSE/USDT', 'ONE/USDT', 'HNT/USDT'
 ]
 
-# Configuración inicial
+# Configuración de exchange con dominio alternativo
 exchange = ccxt.binance({
     'enableRateLimit': True,
-    'timeout': 30000
+    'timeout': 30000,
+    'urls': {
+        'api': {
+            'public': 'https://api.binance.me/api/v3'  # Dominio alternativo
+        }
+    }
 })
 
 # Variables globales
@@ -93,15 +98,24 @@ def fetch_all_data():
     try:
         # Obtener datos para BTC primero
         btc_data = {}
+        volume_set = False  # Bandera para controlar si se estableció el volumen
+        
         for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
             df = fetch_ohlcv('BTC/USDT', tf)
             if df is not None:
                 btc_data[tf] = compute_rsi(df['close'], period=current_config['rsi_period']).iloc[-1]
-                btc_data['volume'] = df['vol'].mean()
-            time.sleep(0.1)
+                if tf == '1h':
+                    btc_data['volume'] = df['vol'].mean()
+                    volume_set = True
+        
         btc_data['symbol'] = 'BTC/USDT'
         rsi_results.append(btc_data)
-        volume_results.append(btc_data['volume'])
+        
+        # Solo agregar volumen si se estableció
+        if volume_set:
+            volume_results.append(btc_data['volume'])
+        else:
+            print("Advertencia: No se pudo obtener volumen para BTC/USDT")
     except Exception as e:
         print(f"Error procesando BTC: {e}")
     
@@ -112,19 +126,25 @@ def fetch_all_data():
             
         try:
             asset_data = {}
+            volume_set = False
             timeframes = set(['15m', '30m', '1h', '2h', '4h', '1d', '1w'])
+            
             for tf in timeframes:
                 df = fetch_ohlcv(sym, tf)
                 if df is not None:
                     asset_data[tf] = compute_rsi(df['close'], period=current_config['rsi_period']).iloc[-1]
                     if tf == '1h':
                         asset_data['volume'] = df['vol'].mean()
+                        volume_set = True
                 time.sleep(0.1)
             
-            if 'volume' in asset_data:
-                asset_data['symbol'] = sym
-                rsi_results.append(asset_data)
+            asset_data['symbol'] = sym
+            rsi_results.append(asset_data)
+            
+            if volume_set:
                 volume_results.append(asset_data['volume'])
+            else:
+                print(f"Advertencia: No se pudo obtener volumen para {sym}")
         except Exception as e:
             print(f"Error procesando {sym}: {e}")
     
@@ -134,14 +154,16 @@ def fetch_all_data():
             df['volume_cat'] = calculate_volume_category(volume_results)
         else:
             df['volume_cat'] = ['Medio'] * len(rsi_results)
+            print("Advertencia: Usando categorías de volumen por defecto")
         
         # Asegurar que BTC está presente
         if 'BTC/USDT' not in df['symbol'].values:
-            df = pd.concat([df, pd.DataFrame([{
+            btc_row = pd.DataFrame([{
                 'symbol': 'BTC/USDT',
                 'volume_cat': 'Alto',
                 **{tf: 50 for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']}
-            }])], ignore_index=True)
+            }])
+            df = pd.concat([df, btc_row], ignore_index=True)
         
         with data_lock:
             rsi_data = df
@@ -337,15 +359,23 @@ def update_config():
         'last_update': last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     })
 
-# Programar actualizaciones periódicas
+# Programar actualizaciones periódicas con reintentos
 scheduler = BackgroundScheduler()
-scheduler.add_job(fetch_all_data, 'interval', minutes=5)
-scheduler.start()
+scheduler.add_job(
+    fetch_all_data, 
+    'interval', 
+    minutes=5,
+    max_instances=2,  # Permitir 2 instancias simultáneas
+    misfire_grace_time=300  # Tolerancia de 5 minutos
+)
 
 # Iniciar la aplicación
 if __name__ == '__main__':
     # Carga inicial de datos
     fetch_all_data()
+    
+    # Iniciar scheduler
+    scheduler.start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))

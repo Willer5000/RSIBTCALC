@@ -50,6 +50,22 @@
             margin-bottom: 25px;
         }
         
+        .progress-bar {
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            margin: 20px 0;
+            height: 20px;
+            overflow: hidden;
+        }
+        
+        .progress {
+            height: 100%;
+            background-color: #3498db;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        
         .info {
             font-size: 0.9rem;
             color: #95a5a6;
@@ -61,18 +77,47 @@
     <div class="loader-container">
         <div class="spinner"></div>
         <h1>Cargando datos de criptomonedas</h1>
-        <div class="status">Por favor espere, esto puede tardar hasta 1 minuto...</div>
+        <div class="status" id="status-message">Iniciando carga de datos...</div>
+        <div class="progress-bar">
+            <div class="progress" id="progress-bar"></div>
+        </div>
         <div class="info">
-            <p>Estamos obteniendo los datos más recientes de Binance</p>
+            <p>Estamos obteniendo los datos más recientes de KuCoin</p>
             <p>La página se actualizará automáticamente cuando los datos estén listos</p>
         </div>
     </div>
 
     <script>
-        // Intentar recargar cada 10 segundos
-        setTimeout(() => {
-            location.reload();
-        }, 10000);
+        // Actualizar progreso cada 2 segundos
+        function checkProgress() {
+            fetch('/data_status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.ready) {
+                        // Recargar la página cuando los datos estén listos
+                        location.reload();
+                    } else if (data.progress) {
+                        // Actualizar barra de progreso y mensaje
+                        const progress = data.progress;
+                        const progressBar = document.getElementById('progress-bar');
+                        const statusMessage = document.getElementById('status-message');
+                        
+                        const percentage = Math.round((progress.progress / progress.total) * 100);
+                        progressBar.style.width = `${percentage}%`;
+                        statusMessage.textContent = progress.message;
+                    }
+                    
+                    // Continuar verificando
+                    setTimeout(checkProgress, 2000);
+                })
+                .catch(error => {
+                    console.error('Error verificando progreso:', error);
+                    setTimeout(checkProgress, 5000);
+                });
+        }
+        
+        // Iniciar verificación
+        setTimeout(checkProgress, 2000);
     </script>
 </body>
 </html>

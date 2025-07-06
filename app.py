@@ -113,6 +113,7 @@ def calculate_rsi_for_symbol(symbol):
             df = fetch_ohlcv(symbol, tf)
             if df is not None and not df.empty:
                 rsi = compute_rsi(df['close'], current_config['rsi_period'])
+                # Usar el último valor disponible, o 50 si no hay datos
                 asset_data[tf] = rsi.iloc[-1] if not rsi.empty else 50
                 
                 # Usar volumen del timeframe de 1h como referencia
@@ -127,7 +128,13 @@ def calculate_rsi_for_symbol(symbol):
         return asset_data
     except Exception as e:
         logger.error(f"Error procesando {symbol}: {str(e)}")
-        return None
+        # Devolver datos predeterminados para este símbolo
+        return {
+            'symbol': symbol,
+            '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
+            '4h': 50, '1d': 50, '1w': 50,
+            'volume': 0
+        }
 
 def fetch_all_data():
     """Obtiene y procesa todos los datos de las criptomonedas"""
@@ -138,25 +145,35 @@ def fetch_all_data():
     
     try:
         results = []
+        success_count = 0
         
-        # Procesar solo los primeros 10 símbolos para la carga inicial
-        initial_symbols = symbols[:10]
-        
-        for symbol in initial_symbols:
+        # Procesar todos los símbolos con manejo de errores robusto
+        for symbol in symbols:
             try:
-                time.sleep(0.5)  # Pequeña pausa para evitar rate limits
+                # Pequeña pausa para evitar rate limits
+                time.sleep(0.3)
+                
                 result = calculate_rsi_for_symbol(symbol)
                 if result:
                     results.append(result)
+                    success_count += 1
                     logger.info(f"Datos de {symbol} obtenidos")
+                    
                     # Enviar progreso a la cola
                     data_queue.put({
-                        'progress': len(results),
-                        'total': len(initial_symbols),
-                        'message': f"Obteniendo datos: {len(results)}/{len(initial_symbols)}"
+                        'progress': success_count,
+                        'total': len(symbols),
+                        'message': f"Obteniendo datos: {success_count}/{len(symbols)}"
                     })
             except Exception as e:
-                logger.error(f"Error procesando {symbol}: {str(e)}")
+                logger.error(f"Error crítico procesando {symbol}: {str(e)}")
+                # Añadir datos predeterminados incluso si hay error
+                results.append({
+                    'symbol': symbol,
+                    '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
+                    '4h': 50, '1d': 50, '1w': 50,
+                    'volume': 0
+                })
         
         if results:
             df = pd.DataFrame(results)
@@ -180,10 +197,7 @@ def fetch_all_data():
                 rsi_data = df
                 last_update_time = datetime.utcnow()
                 data_ready = True
-            logger.info(f"Datos iniciales actualizados. Monedas: {len(results)}/{len(initial_symbols)}")
-            
-            # Continuar con el resto de los símbolos en segundo plano
-            threading.Thread(target=load_remaining_data, args=(results,)).start()
+            logger.info(f"Datos actualizados con éxito. Monedas exitosas: {success_count}/{len(symbols)}")
         else:
             logger.warning("No se obtuvieron datos para ninguna moneda")
             data_ready = False
@@ -192,54 +206,8 @@ def fetch_all_data():
         data_ready = False
     
     elapsed = time.time() - start_time
-    logger.info(f"Tiempo total de actualización inicial: {elapsed:.2f} segundos")
+    logger.info(f"Tiempo total de actualización: {elapsed:.2f} segundos")
     return data_ready
-
-def load_remaining_data(initial_results):
-    """Carga el resto de los datos en segundo plano"""
-    global rsi_data, last_update_time
-    
-    try:
-        results = initial_results.copy()
-        remaining_symbols = symbols[10:]
-        
-        for symbol in remaining_symbols:
-            try:
-                time.sleep(0.5)  # Pequeña pausa para evitar rate limits
-                result = calculate_rsi_for_symbol(symbol)
-                if result:
-                    results.append(result)
-                    logger.info(f"Datos de {symbol} obtenidos (fondo)")
-            except Exception as e:
-                logger.error(f"Error procesando {symbol} (fondo): {str(e)}")
-        
-        if results:
-            df = pd.DataFrame(results)
-            
-            # Calcular categorías de volumen
-            if len(df) > 0:
-                volumes = df['volume'].values
-                if len(volumes) > 0:
-                    high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
-                    low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
-                    df['volume_cat'] = df.apply(lambda row: 
-                        'Alto' if row['volume'] >= high_thresh else 
-                        'Bajo' if row['volume'] <= low_thresh else 
-                        'Medio', axis=1)
-                else:
-                    df['volume_cat'] = ['Medio'] * len(results)
-            else:
-                df['volume_cat'] = ['Medio'] * len(results)
-            
-            with data_lock:
-                rsi_data = df
-                last_update_time = datetime.utcnow()
-            logger.info(f"Datos completos actualizados. Monedas: {len(results)}/{len(symbols)}")
-            
-            # Notificar que los datos completos están listos
-            data_queue.put({'complete': True})
-    except Exception as e:
-        logger.error(f"Error cargando datos restantes: {str(e)}")
 
 def create_plot():
     """Crea el gráfico Plotly"""
@@ -306,36 +274,45 @@ def create_plot():
                 hovertext=f"{coin_name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: ${row['volume']:,.0f} ({row['volume_cat']})"
             ))
     
-    # Añadir trazas a la figura
-    fig = go.Figure(data=traces)
-    
-    # Añadir líneas de referencia
-    fig.add_shape(type="line", 
-                  x0=current_config['lower_x'], y0=0, 
-                  x1=current_config['lower_x'], y1=100,
-                  line=dict(color="Green", width=3, dash="dash"))
-    fig.add_shape(type="line", 
-                  x0=current_config['upper_x'], y0=0, 
-                  x1=current_config['upper_x'], y1=100,
-                  line=dict(color="Red", width=3, dash="dash"))
-    fig.add_shape(type="line", 
-                  x0=0, y0=current_config['lower_y'], 
-                  x1=100, y1=current_config['lower_y'],
-                  line=dict(color="Green", width=3, dash="dash"))
-    fig.add_shape(type="line", 
-                  x0=0, y0=current_config['upper_y'], 
-                  x1=100, y1=current_config['upper_y'],
-                  line=dict(color="Red", width=3, dash="dash"))
-    
-    # Añadir zonas
-    fig.add_hrect(y0=current_config['upper_y'], y1=100,
-                  line_width=0, fillcolor="red", opacity=0.15)
-    fig.add_hrect(y0=0, y1=current_config['lower_y'],
-                  line_width=0, fillcolor="green", opacity=0.15)
-    fig.add_vrect(x0=current_config['upper_x'], x1=100,
-                  line_width=0, fillcolor="red", opacity=0.15)
-    fig.add_vrect(x0=0, x1=current_config['lower_x'],
-                  line_width=0, fillcolor="green", opacity=0.15)
+    # Si no hay trazas, mostrar mensaje
+    if not traces:
+        fig.add_annotation(
+            text="Datos insuficientes para mostrar el gráfico",
+            x=0.5, y=0.5, 
+            showarrow=False, 
+            font=dict(size=24, color="red")
+        )
+    else:
+        # Añadir trazas a la figura
+        fig = go.Figure(data=traces)
+        
+        # Añadir líneas de referencia
+        fig.add_shape(type="line", 
+                      x0=current_config['lower_x'], y0=0, 
+                      x1=current_config['lower_x'], y1=100,
+                      line=dict(color="Green", width=3, dash="dash"))
+        fig.add_shape(type="line", 
+                      x0=current_config['upper_x'], y0=0, 
+                      x1=current_config['upper_x'], y1=100,
+                      line=dict(color="Red", width=3, dash="dash"))
+        fig.add_shape(type="line", 
+                      x0=0, y0=current_config['lower_y'], 
+                      x1=100, y1=current_config['lower_y'],
+                      line=dict(color="Green", width=3, dash="dash"))
+        fig.add_shape(type="line", 
+                      x0=0, y0=current_config['upper_y'], 
+                      x1=100, y1=current_config['upper_y'],
+                      line=dict(color="Red", width=3, dash="dash"))
+        
+        # Añadir zonas
+        fig.add_hrect(y0=current_config['upper_y'], y1=100,
+                      line_width=0, fillcolor="red", opacity=0.15)
+        fig.add_hrect(y0=0, y1=current_config['lower_y'],
+                      line_width=0, fillcolor="green", opacity=0.15)
+        fig.add_vrect(x0=current_config['upper_x'], x1=100,
+                      line_width=0, fillcolor="red", opacity=0.15)
+        fig.add_vrect(x0=0, x1=current_config['lower_x'],
+                      line_width=0, fillcolor="green", opacity=0.15)
     
     # Configurar layout
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M (UTC)")

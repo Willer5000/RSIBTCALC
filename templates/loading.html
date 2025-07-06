@@ -77,6 +77,17 @@
             margin-top: 15px;
             font-size: 0.9rem;
         }
+        
+        .action-button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
     </style>
 </head>
 <body>
@@ -94,9 +105,22 @@
             <p>Estamos obteniendo los datos más recientes de KuCoin</p>
             <p>La página se actualizará automáticamente cuando los datos estén listos</p>
         </div>
+        <button class="action-button" id="force-reload" style="display:none;">
+            Mostrar gráfico con datos disponibles
+        </button>
     </div>
 
     <script>
+        // Elementos del DOM
+        const statusMessage = document.getElementById('status-message');
+        const progressBar = document.getElementById('progress-bar');
+        const errorWarning = document.getElementById('error-warning');
+        const forceReloadBtn = document.getElementById('force-reload');
+        
+        // Tiempo máximo de espera (45 segundos)
+        const MAX_WAIT_TIME = 45000;
+        let waitTimer = null;
+        
         // Actualizar progreso cada 2 segundos
         function checkProgress() {
             fetch('/data_status')
@@ -108,9 +132,6 @@
                     } else if (data.progress) {
                         // Actualizar barra de progreso y mensaje
                         const progress = data.progress;
-                        const progressBar = document.getElementById('progress-bar');
-                        const statusMessage = document.getElementById('status-message');
-                        
                         const percentage = Math.round((progress.progress / progress.total) * 100);
                         progressBar.style.width = `${percentage}%`;
                         statusMessage.textContent = progress.message;
@@ -125,15 +146,29 @@
                 });
         }
         
+        // Mostrar botón de acción forzada
+        function showForceReload() {
+            errorWarning.textContent = "La carga está tardando más de lo esperado. Puede mostrar el gráfico con los datos disponibles.";
+            forceReloadBtn.style.display = 'block';
+            
+            forceReloadBtn.addEventListener('click', () => {
+                // Forzar recarga de la página para mostrar datos disponibles
+                window.location.href = '/?force=1';
+            });
+        }
+        
         // Iniciar verificación
         setTimeout(checkProgress, 2000);
         
-        // Si después de 60 segundos no hay datos, forzar recarga
-        setTimeout(() => {
-            if (!document.hidden) {
-                location.reload();
+        // Configurar temporizador para mostrar opción de fuerza
+        waitTimer = setTimeout(showForceReload, MAX_WAIT_TIME);
+        
+        // Cancelar temporizador si la página se oculta
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden && waitTimer) {
+                clearTimeout(waitTimer);
             }
-        }, 60000);
+        });
     </script>
 </body>
 </html>

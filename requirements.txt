@@ -4,3 +4,4 @@ numpy
 ccxt
 plotly
 gunicorn
+apscheduler

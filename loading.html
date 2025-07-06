@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cargando datos...</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #f8f9fa;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+        
+        .loader-container {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            max-width: 600px;
+        }
+        
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        
+        .spinner {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3498db;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1.5s linear infinite;
+            margin: 0 auto 30px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .status {
+            font-size: 1.1rem;
+            color: #7f8c8d;
+            margin-bottom: 25px;
+        }
+        
+        .info {
+            font-size: 0.9rem;
+            color: #95a5a6;
+            margin-top: 25px;
+        }
+    </style>
+</head>
+<body>
+    <div class="loader-container">
+        <div class="spinner"></div>
+        <h1>Cargando datos de criptomonedas</h1>
+        <div class="status">Por favor espere, esto puede tardar hasta 2 minutos...</div>
+        <div class="info">
+            <p>Estamos obteniendo los datos más recientes de CoinGecko</p>
+            <p>La página se actualizará automáticamente cuando los datos estén listos</p>
+        </div>
+    </div>
+
+    <script>
+        // Intentar recargar cada 15 segundos
+        setTimeout(() => {
+            location.reload();
+        }, 15000);
+        
+        // Verificar estado cada 5 segundos
+        setInterval(() => {
+            fetch('/refresh')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === "Actualización iniciada") {
+                        console.log("Actualización en curso...");
+                    }
+                });
+        }, 5000);
+    </script>
+</body>
+</html>

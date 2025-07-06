@@ -136,22 +136,28 @@
         }
         
         .loading {
-            display: none;
             text-align: center;
-            padding: 20px;
-            font-size: 1.2rem;
+            padding: 10px;
+            font-size: 1.1rem;
             color: var(--secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
         }
         
-        .loading span {
-            display: inline-block;
-            animation: pulse 1.5s infinite;
+        .loading-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid var(--secondary);
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
         }
         
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
         
         @media (max-width: 768px) {
@@ -173,7 +179,7 @@
         
         <div class="status-bar">
             <div>Última actualización: <span id="last-update">{{ last_update }}</span></div>
-            <div>Monedas analizadas: <span id="coin-count">60</span></div>
+            <div>Monedas cargadas: <span id="coin-count">{{ loaded_count }}/{{ total_count }}</span></div>
         </div>
         
         <div class="controls">
@@ -181,194 +187,4 @@
                 <label for="timeframe">Escalas Temporales:</label>
                 <select id="timeframe">
                     <option value="15m_1h" {% if current_config.timeframe == ('15m','1h') %}selected{% endif %}>15m vs 1h</option>
-                    <option value="30m_2h" {% if current_config.timeframe == ('30m','2h') %}selected{% endif %}>30m vs 2h</option>
-                    <option value="1h_4h" {% if current_config.timeframe == ('1h','4h') %}selected{% endif %}>1h vs 4h</option>
-                    <option value="4h_1d" {% if current_config.timeframe == ('4h','1d') %}selected{% endif %}>4h vs 1d</option>
-                    <option value="1d_1w" {% if current_config.timeframe == ('1d','1w') %}selected{% endif %}>1d vs 1w</option>
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="volume">Filtro por Volumen:</label>
-                <select id="volume">
-                    <option value="Todas" {% if current_config.volume_filter == 'Todas' %}selected{% endif %}>Todas</option>
-                    <option value="Alto" {% if current_config.volume_filter == 'Alto' %}selected{% endif %}>Alto</option>
-                    <option value="Medio" {% if current_config.volume_filter == 'Medio' %}selected{% endif %}>Medio</option>
-                    <option value="Bajo" {% if current_config.volume_filter == 'Bajo' %}selected{% endif %}>Bajo</option>
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="period">Período RSI:</label>
-                <select id="period">
-                    <option value="7" {% if current_config.rsi_period == 7 %}selected{% endif %}>7</option>
-                    <option value="14" {% if current_config.rsi_period == 14 %}selected{% endif %}>14</option>
-                    <option value="21" {% if current_config.rsi_period == 21 %}selected{% endif %}>21</option>
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="lower_x">Límite Inferior (X):</label>
-                <select id="lower_x">
-                    {% for i in [5,10,15,20,25,30,35,40,45] %}
-                    <option value="{{ i }}" {% if current_config.lower_x == i %}selected{% endif %}>{{ i }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="upper_x">Límite Superior (X):</label>
-                <select id="upper_x">
-                    {% for i in [55,60,65,70,75,80,85,90,95] %}
-                    <option value="{{ i }}" {% if current_config.upper_x == i %}selected{% endif %}>{{ i }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="lower_y">Límite Inferior (Y):</label>
-                <select id="lower_y">
-                    {% for i in [5,10,15,20,25,30,35,40,45] %}
-                    <option value="{{ i }}" {% if current_config.lower_y == i %}selected{% endif %}>{{ i }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="upper_y">Límite Superior (Y):</label>
-                <select id="upper_y">
-                    {% for i in [55,60,65,70,75,80,85,90,95] %}
-                    <option value="{{ i }}" {% if current_config.upper_y == i %}selected{% endif %}>{{ i }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label>&nbsp;</label>
-                <button id="refresh" class="refresh">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
-                    </svg>
-                    Actualizar Datos
-                </button>
-            </div>
-        </div>
-        
-        <div class="loading" id="loading">
-            <span>Actualizando datos, por favor espere...</span>
-        </div>
-        
-        <div id="graph">{{ graph_html | safe }}</div>
-        
-        <div class="update-info">
-            Los datos se actualizan automáticamente cada 5 minutos
-        </div>
-    </div>
-
-    <script>
-        // Estado de la aplicación
-        let isUpdating = false;
-        
-        // Actualizar elementos de control con la configuración actual
-        document.addEventListener('DOMContentLoaded', function() {
-            // Configurar eventos
-            document.querySelectorAll('select').forEach(select => {
-                select.addEventListener('change', updateConfig);
-            });
-            
-            document.getElementById('refresh').addEventListener('click', function() {
-                if (isUpdating) return;
-                refreshData();
-            });
-        });
-        
-        // Función para mostrar/ocultar estado de carga
-        function toggleLoading(show) {
-            const loadingElement = document.getElementById('loading');
-            loadingElement.style.display = show ? 'block' : 'none';
-            isUpdating = show;
-        }
-        
-        // Actualizar configuración
-        function updateConfig() {
-            if (isUpdating) return;
-            toggleLoading(true);
-            
-            const config = {
-                param: this.id,
-                value: this.value
-            };
-            
-            fetch('/update_config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(config)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    // Actualizar el gráfico
-                    document.getElementById('graph').innerHTML = data.graph_html;
-                    document.getElementById('last-update').textContent = data.last_update;
-                }
-                toggleLoading(false);
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                toggleLoading(false);
-                alert('Error al actualizar la configuración');
-            });
-        }
-        
-        // Refrescar datos manualmente
-        function refreshData() {
-            toggleLoading(true);
-            
-            fetch('/update_config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    param: 'refresh',
-                    value: '1'
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('graph').innerHTML = data.graph_html;
-                    document.getElementById('last-update').textContent = data.last_update;
-                }
-                toggleLoading(false);
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                toggleLoading(false);
-                alert('Error al actualizar los datos');
-            });
-        }
-    </script>
-<script>
-    // Verificar si los datos están completos
-    function checkDataCompleteness() {
-        fetch('/data_status')
-            .then(response => response.json())
-            .then(data => {
-                if (data.progress && data.progress.complete) {
-                    // Recargar para mostrar datos completos
-                    location.reload();
-                }
-            })
-            .catch(error => console.error('Error:', error));
-    }
-    
-    // Verificar cada 30 segundos si hay datos completos
-    setInterval(checkDataCompleteness, 30000);
-</script>
-    
-</body>
-</html>
+                    <option value="30m_2h" {% if current_config.timeframe == ('30

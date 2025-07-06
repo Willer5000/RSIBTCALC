@@ -1,7 +1,8 @@
 flask
 pandas
 numpy
-ccxt==4.4.92
+requests
 plotly
 gunicorn
+gevent
 apscheduler

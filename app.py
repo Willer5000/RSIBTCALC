@@ -11,6 +11,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
 import ccxt
+import queue
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configuración de exchange - Usamos KuCoin que es más global
+# Configuración de exchange - Usamos KuCoin
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'timeout': 30000,
@@ -51,6 +52,7 @@ rsi_data = pd.DataFrame()
 last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
 data_ready = False
+data_queue = queue.Queue()
 
 current_config = {
     'timeframe': ('15m', '1h'),
@@ -111,7 +113,7 @@ def calculate_rsi_for_symbol(symbol):
             df = fetch_ohlcv(symbol, tf)
             if df is not None and not df.empty:
                 rsi = compute_rsi(df['close'], current_config['rsi_period'])
-                asset_data[tf] = rsi.iloc[-1]
+                asset_data[tf] = rsi.iloc[-1] if not rsi.empty else 50
                 
                 # Usar volumen del timeframe de 1h como referencia
                 if tf == '1h':
@@ -137,16 +139,22 @@ def fetch_all_data():
     try:
         results = []
         
-        # Procesar cada símbolo con un pequeño retraso para evitar rate limits
-        for symbol in symbols:
+        # Procesar solo los primeros 10 símbolos para la carga inicial
+        initial_symbols = symbols[:10]
+        
+        for symbol in initial_symbols:
             try:
-                # Pequeña pausa para evitar sobrecargar la API
-                time.sleep(0.5)
-                
+                time.sleep(0.5)  # Pequeña pausa para evitar rate limits
                 result = calculate_rsi_for_symbol(symbol)
                 if result:
                     results.append(result)
                     logger.info(f"Datos de {symbol} obtenidos")
+                    # Enviar progreso a la cola
+                    data_queue.put({
+                        'progress': len(results),
+                        'total': len(initial_symbols),
+                        'message': f"Obteniendo datos: {len(results)}/{len(initial_symbols)}"
+                    })
             except Exception as e:
                 logger.error(f"Error procesando {symbol}: {str(e)}")
         
@@ -172,7 +180,10 @@ def fetch_all_data():
                 rsi_data = df
                 last_update_time = datetime.utcnow()
                 data_ready = True
-            logger.info(f"Datos actualizados con éxito. Monedas: {len(results)}/{len(symbols)}")
+            logger.info(f"Datos iniciales actualizados. Monedas: {len(results)}/{len(initial_symbols)}")
+            
+            # Continuar con el resto de los símbolos en segundo plano
+            threading.Thread(target=load_remaining_data, args=(results,)).start()
         else:
             logger.warning("No se obtuvieron datos para ninguna moneda")
             data_ready = False
@@ -181,8 +192,54 @@ def fetch_all_data():
         data_ready = False
     
     elapsed = time.time() - start_time
-    logger.info(f"Tiempo total de actualización: {elapsed:.2f} segundos")
+    logger.info(f"Tiempo total de actualización inicial: {elapsed:.2f} segundos")
     return data_ready
+
+def load_remaining_data(initial_results):
+    """Carga el resto de los datos en segundo plano"""
+    global rsi_data, last_update_time
+    
+    try:
+        results = initial_results.copy()
+        remaining_symbols = symbols[10:]
+        
+        for symbol in remaining_symbols:
+            try:
+                time.sleep(0.5)  # Pequeña pausa para evitar rate limits
+                result = calculate_rsi_for_symbol(symbol)
+                if result:
+                    results.append(result)
+                    logger.info(f"Datos de {symbol} obtenidos (fondo)")
+            except Exception as e:
+                logger.error(f"Error procesando {symbol} (fondo): {str(e)}")
+        
+        if results:
+            df = pd.DataFrame(results)
+            
+            # Calcular categorías de volumen
+            if len(df) > 0:
+                volumes = df['volume'].values
+                if len(volumes) > 0:
+                    high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
+                    low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
+                    df['volume_cat'] = df.apply(lambda row: 
+                        'Alto' if row['volume'] >= high_thresh else 
+                        'Bajo' if row['volume'] <= low_thresh else 
+                        'Medio', axis=1)
+                else:
+                    df['volume_cat'] = ['Medio'] * len(results)
+            else:
+                df['volume_cat'] = ['Medio'] * len(results)
+            
+            with data_lock:
+                rsi_data = df
+                last_update_time = datetime.utcnow()
+            logger.info(f"Datos completos actualizados. Monedas: {len(results)}/{len(symbols)}")
+            
+            # Notificar que los datos completos están listos
+            data_queue.put({'complete': True})
+    except Exception as e:
+        logger.error(f"Error cargando datos restantes: {str(e)}")
 
 def create_plot():
     """Crea el gráfico Plotly"""
@@ -333,9 +390,26 @@ def index():
                            current_config=current_config,
                            last_update=last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
+# Ruta para verificar estado de datos
+@app.route('/data_status')
+def data_status():
+    global data_ready
+    
+    # Verificar si hay actualizaciones de progreso
+    progress = None
+    while not data_queue.empty():
+        progress = data_queue.get_nowait()
+    
+    return jsonify({
+        'ready': data_ready,
+        'progress': progress
+    })
+
 # Ruta para forzar actualización
 @app.route('/refresh')
 def refresh():
+    global data_ready
+    data_ready = False
     threading.Thread(target=fetch_all_data).start()
     return jsonify({"status": "Actualización iniciada"})
 
@@ -382,6 +456,8 @@ def update_config():
     
     # Forzar recálculo si se cambió periodo
     if need_data_reload:
+        global data_ready
+        data_ready = False
         threading.Thread(target=fetch_all_data).start()
     
     # Crear nuevo gráfico
@@ -410,11 +486,20 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     except Exception as e:
         logger.error(f"Error iniciando scheduler: {e}")
 
+# Iniciar la carga de datos al arrancar
+def start_data_loading():
+    global data_ready
+    logger.info("Iniciando carga inicial de datos...")
+    fetch_all_data()
+
 # Iniciar la aplicación
 if __name__ == '__main__':
-    # Iniciar la carga de datos
-    threading.Thread(target=fetch_all_data).start()
+    # Iniciar la carga de datos en un hilo separado
+    threading.Thread(target=start_data_loading).start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+else:
+    # Para entornos WSGI como Render
+    threading.Thread(target=start_data_loading).start()

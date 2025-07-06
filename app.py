@@ -9,36 +9,49 @@ import os
 import requests
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+import ccxt
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Top 60 criptomonedas por capitalización
-symbols = [
-    'bitcoin', 'ethereum', 'tether', 'binancecoin', 'solana', 
-    'ripple', 'cardano', 'dogecoin', 'avalanche-2',
-    'polkadot', 'chainlink', 'matic-network', 'shiba-inu',
-    'litecoin', 'uniswap', 'cosmos', 'stellar',
-    'ethereum-classic', 'filecoin', 'aptos', 'arbitrum',
-    'near', 'optimism', 'vechain', 'quant-network',
-    'thorchain', 'algorand', 'the-graph', 'aave',
-    'axie-infinity', 'tezos', 'stacks', 'elrond-erd-2',
-    'theta-token', 'eos', 'flow', 'the-sandbox',
-    'decentraland', 'apecoin', 'curve-dao-token', 'kava',
-    'immutable-x', 'render-token', 'mina-protocol', 'maker',
-    'havven', 'compound-governance-token', 'zcash', 'dash',
-    'enjincoin', 'iota', 'kusama', 'monero',
-    'neo', 'gala', 'chiliz', 'lido-dao',
-    'waves', 'oasis-network', 'harmony', 'helium'
-]
+# Configuración de exchange
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'timeout': 30000,
+    'options': {
+        'defaultType': 'spot'
+    }
+})
 
-# Fuente de datos
-COINGECKO_API = "https://api.coingecko.com/api/v3"
+# Top 60 criptomonedas por capitalización (símbolos de trading)
+symbols = [
+    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 
+    'XRP/USDT', 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT',
+    'DOT/USDT', 'LINK/USDT', 'MATIC/USDT', 'SHIB/USDT',
+    'LTC/USDT', 'UNI/USDT', 'ATOM/USDT', 'XLM/USDT',
+    'ETC/USDT', 'FIL/USDT', 'APT/USDT', 'ARB/USDT',
+    'NEAR/USDT', 'OP/USDT', 'VET/USDT', 'QNT/USDT',
+    'RUNE/USDT', 'ALGO/USDT', 'GRT/USDT', 'AAVE/USDT',
+    'AXS/USDT', 'XTZ/USDT', 'STX/USDT', 'EGLD/USDT',
+    'THETA/USDT', 'EOS/USDT', 'FLOW/USDT', 'SAND/USDT',
+    'MANA/USDT', 'APE/USDT', 'CRV/USDT', 'KAVA/USDT',
+    'IMX/USDT', 'RNDR/USDT', 'MINA/USDT', 'MKR/USDT',
+    'SNX/USDT', 'COMP/USDT', 'ZEC/USDT', 'DASH/USDT',
+    'ENJ/USDT', 'IOTA/USDT', 'KSM/USDT', 'XMR/USDT',
+    'NEO/USDT', 'GALA/USDT', 'CHZ/USDT', 'LDO/USDT',
+    'WAVES/USDT', 'ROSE/USDT', 'ONE/USDT', 'HNT/USDT'
+]
 
 # Variables globales
 rsi_data = pd.DataFrame()
 last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
-data_ready = False  # Bandera para saber si los datos están listos
+data_ready = False
 
 current_config = {
     'timeframe': ('15m', '1h'),
@@ -50,136 +63,95 @@ current_config = {
     'upper_y': 70
 }
 
+# Mapeo de timeframes
+TIMEFRAME_MAP = {
+    '15m': '15m',
+    '30m': '30m',
+    '1h': '1h',
+    '2h': '2h',
+    '4h': '4h',
+    '1d': '1d',
+    '1w': '1w'
+}
+
 # Funciones de cálculo
 def compute_rsi(series, period=14):
     """Calcula el RSI para una serie de precios"""
-    try:
-        delta = series.diff()
-        up = delta.clip(lower=0)
-        down = -delta.clip(upper=0)
-        ma_up = up.ewm(com=period-1, adjust=False).mean()
-        ma_down = down.ewm(com=period-1, adjust=False).mean()
-        rs = ma_up / ma_down
-        return 100 - (100 / (1 + rs))
-    except Exception as e:
-        print(f"Error calculando RSI: {e}")
-        return pd.Series([50] * len(series))
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    ma_up = up.ewm(alpha=1/period, adjust=False).mean()
+    ma_down = down.ewm(alpha=1/period, adjust=False).mean()
+    rs = ma_up / ma_down
+    return 100 - (100 / (1 + rs))
 
-# Obtener datos históricos desde CoinGecko
-def get_historical_data(coin_id, days=30):
-    """Obtiene datos históricos para una criptomoneda"""
+def fetch_ohlcv(symbol, timeframe, limit=100):
+    """Obtiene datos OHLCV del exchange"""
     try:
-        url = f"{COINGECKO_API}/coins/{coin_id}/market_chart"
-        params = {
-            'vs_currency': 'usd',
-            'days': days,
-            'interval': 'daily'
-        }
-        response = requests.get(url, params=params, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        
-        if 'prices' in data and data['prices']:
-            df = pd.DataFrame(data['prices'], columns=['ts', 'price'])
-            df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-            df.set_index('ts', inplace=True)
-            return df
+        tf = TIMEFRAME_MAP[timeframe]
+        ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=limit)
+        if not ohlcv:
+            return None
+            
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception as e:
+        logger.error(f"Error obteniendo datos para {symbol} {timeframe}: {str(e)}")
         return None
-    except requests.exceptions.RequestException as e:
-        print(f"Error en la solicitud para {coin_id}: {e}")
-    except Exception as e:
-        print(f"Error general obteniendo datos para {coin_id}: {e}")
-    return None
 
-# Obtener volúmenes en una sola llamada
-def fetch_all_volumes():
-    """Obtiene todos los volúmenes en una sola llamada a la API"""
+def calculate_rsi_for_symbol(symbol):
+    """Calcula todos los RSI para un símbolo"""
     try:
-        url = f"{COINGECKO_API}/coins/markets"
-        params = {
-            'vs_currency': 'usd',
-            'ids': ','.join(symbols),
-            'per_page': 250
-        }
-        response = requests.get(url, params=params, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        return {coin['id']: coin['total_volume'] for coin in data}
-    except Exception as e:
-        print(f"Error obteniendo volúmenes: {e}")
-        return {}
-
-# Calcular RSI para diferentes timeframes
-def calculate_timeframe_rsi(df, timeframe, period=14):
-    """Calcula el RSI para un timeframe específico"""
-    try:
-        if timeframe == '15m':
-            resampled = df['price'].resample('15T').ohlc().dropna()
-        elif timeframe == '30m':
-            resampled = df['price'].resample('30T').ohlc().dropna()
-        elif timeframe == '1h':
-            resampled = df['price'].resample('1H').ohlc().dropna()
-        elif timeframe == '2h':
-            resampled = df['price'].resample('2H').ohlc().dropna()
-        elif timeframe == '4h':
-            resampled = df['price'].resample('4H').ohlc().dropna()
-        elif timeframe == '1d':
-            resampled = df['price'].resample('1D').ohlc().dropna()
-        elif timeframe == '1w':
-            resampled = df['price'].resample('1W').ohlc().dropna()
-        else:
-            return 50
+        asset_data = {}
+        volumes = []
         
-        if resampled.empty:
-            return 50
+        # Obtener datos para cada timeframe
+        for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
+            df = fetch_ohlcv(symbol, tf)
+            if df is not None and not df.empty:
+                rsi = compute_rsi(df['close'], current_config['rsi_period'])
+                asset_data[tf] = rsi.iloc[-1]
+                
+                # Usar volumen del timeframe de 1h como referencia
+                if tf == '1h':
+                    volumes = df['volume'].tail(24).mean()
+            else:
+                asset_data[tf] = 50
+                volumes = 0
         
-        rsi = compute_rsi(resampled['close'], period)
-        return rsi.iloc[-1] if not rsi.empty else 50
+        asset_data['symbol'] = symbol
+        asset_data['volume'] = volumes
+        return asset_data
     except Exception as e:
-        print(f"Error calculando RSI para timeframe {timeframe}: {e}")
-        return 50
+        logger.error(f"Error procesando {symbol}: {str(e)}")
+        return None
 
 def fetch_all_data():
     """Obtiene y procesa todos los datos de las criptomonedas"""
     global rsi_data, last_update_time, data_ready
     
-    print("Iniciando actualización de datos...")
+    logger.info("Iniciando actualización de datos...")
     start_time = time.time()
     
     try:
-        # Obtener todos los volúmenes en una sola llamada
-        volumes_map = fetch_all_volumes()
+        results = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(calculate_rsi_for_symbol, symbol): symbol for symbol in symbols}
+            
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                        logger.info(f"Datos de {symbol} obtenidos")
+                except Exception as e:
+                    logger.error(f"Error procesando {symbol}: {str(e)}")
         
-        rsi_results = []
-        success_count = 0
-        
-        # Procesar cada moneda con un pequeño delay para evitar rate limits
-        for coin_id in symbols:
-            try:
-                # Pequeña pausa para evitar sobrecargar la API
-                time.sleep(1.2)  # 1.2 segundos entre solicitudes (50/min)
-                
-                df = get_historical_data(coin_id, 30)
-                if df is None or df.empty:
-                    print(f"No se obtuvieron datos para {coin_id}")
-                    continue
-                
-                asset_data = {}
-                for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
-                    asset_data[tf] = calculate_timeframe_rsi(df, tf, current_config['rsi_period'])
-                
-                # Formatear símbolo para mostrar
-                symbol_name = coin_id.upper() if coin_id == 'btc' else coin_id.replace('-', ' ').title()
-                asset_data['symbol'] = f"{symbol_name}/USDT"
-                asset_data['volume'] = volumes_map.get(coin_id, 0)
-                rsi_results.append(asset_data)
-                success_count += 1
-                print(f"Datos de {coin_id} obtenidos")
-            except Exception as e:
-                print(f"Error procesando {coin_id}: {e}")
-        
-        if rsi_results:
-            df = pd.DataFrame(rsi_results)
+        if results:
+            df = pd.DataFrame(results)
             
             # Calcular categorías de volumen
             if len(df) > 0:
@@ -192,24 +164,24 @@ def fetch_all_data():
                         'Bajo' if row['volume'] <= low_thresh else 
                         'Medio', axis=1)
                 else:
-                    df['volume_cat'] = ['Medio'] * len(rsi_results)
+                    df['volume_cat'] = ['Medio'] * len(results)
             else:
-                df['volume_cat'] = ['Medio'] * len(rsi_results)
+                df['volume_cat'] = ['Medio'] * len(results)
             
             with data_lock:
                 rsi_data = df
                 last_update_time = datetime.utcnow()
                 data_ready = True
-            print(f"Datos actualizados con éxito. Monedas: {success_count}/{len(symbols)}")
+            logger.info(f"Datos actualizados con éxito. Monedas: {len(results)}/{len(symbols)}")
         else:
-            print("No se obtuvieron datos para ninguna moneda")
+            logger.warning("No se obtuvieron datos para ninguna moneda")
             data_ready = False
     except Exception as e:
-        print(f"Error crítico en fetch_all_data: {e}")
+        logger.error(f"Error crítico en fetch_all_data: {str(e)}")
         data_ready = False
     
     elapsed = time.time() - start_time
-    print(f"Tiempo total de actualización: {elapsed:.2f} segundos")
+    logger.info(f"Tiempo total de actualización: {elapsed:.2f} segundos")
     return data_ready
 
 def create_plot():
@@ -245,14 +217,15 @@ def create_plot():
     traces = []
     for i, row in plot_data.iterrows():
         symbol = row['symbol']
-        color = 'gold' if 'BTC' in symbol else \
+        coin_name = symbol.split('/')[0]
+        
+        color = 'gold' if coin_name == 'BTC' else \
                 'green' if row['volume_cat'] == 'Alto' else \
                 'blue' if row['volume_cat'] == 'Medio' else 'red'
         
-        size = 50 if 'BTC' in symbol else 30
-        name = symbol.split('/')[0]
+        size = 50 if coin_name == 'BTC' else 30
         
-        if 'BTC' in symbol:
+        if coin_name == 'BTC':
             textfont = dict(size=18, color='darkorange', family='Arial', weight='bold')
         else:
             textfont = dict(size=14, color='black', weight='bold')
@@ -268,12 +241,12 @@ def create_plot():
                     color=color,
                     line=dict(width=2, color='black')
                 ),
-                text=name,
+                text=coin_name,
                 textposition='top center',
                 textfont=textfont,
-                name=name,
+                name=coin_name,
                 hoverinfo='text',
-                hovertext=f"{name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: ${row['volume']:,.0f} ({row['volume_cat']})"
+                hovertext=f"{coin_name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: ${row['volume']:,.0f} ({row['volume_cat']})"
             ))
     
     # Añadir trazas a la figura
@@ -382,6 +355,9 @@ def update_config():
         '1d_1w': ('1d', '1w')
     }
     
+    # Determinar si se necesita recargar datos
+    need_data_reload = False
+    
     with data_lock:
         config = current_config.copy()
         
@@ -391,6 +367,7 @@ def update_config():
             config['volume_filter'] = value
         elif param == 'period':
             config['rsi_period'] = int(value)
+            need_data_reload = True
         elif param == 'lower_x':
             config['lower_x'] = int(value)
         elif param == 'upper_x':
@@ -404,7 +381,7 @@ def update_config():
         current_config.update(config)
     
     # Forzar recálculo si se cambió periodo o timeframe
-    if param in ['timeframe', 'period']:
+    if need_data_reload:
         threading.Thread(target=fetch_all_data).start()
     
     # Crear nuevo gráfico
@@ -425,18 +402,18 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         scheduler.add_job(
             fetch_all_data, 
             'interval', 
-            hours=1,
+            minutes=15,
             max_instances=1
         )
         scheduler.start()
-        print("Scheduler de actualización iniciado")
+        logger.info("Scheduler de actualización iniciado")
     except Exception as e:
-        print(f"Error iniciando scheduler: {e}")
+        logger.error(f"Error iniciando scheduler: {e}")
 
 # Iniciar la aplicación
 if __name__ == '__main__':
     # Iniciar la carga de datos
-    data_ready = fetch_all_data()
+    threading.Thread(target=fetch_all_data).start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))

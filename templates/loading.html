@@ -71,6 +71,12 @@
             color: #95a5a6;
             margin-top: 25px;
         }
+        
+        .error-warning {
+            color: #e74c3c;
+            margin-top: 15px;
+            font-size: 0.9rem;
+        }
     </style>
 </head>
 <body>
@@ -80,6 +86,9 @@
         <div class="status" id="status-message">Iniciando carga de datos...</div>
         <div class="progress-bar">
             <div class="progress" id="progress-bar"></div>
+        </div>
+        <div class="error-warning" id="error-warning">
+            Algunos datos pueden estar incompletos debido a errores en la API
         </div>
         <div class="info">
             <p>Estamos obteniendo los datos más recientes de KuCoin</p>
@@ -118,6 +127,13 @@
         
         // Iniciar verificación
         setTimeout(checkProgress, 2000);
+        
+        // Si después de 60 segundos no hay datos, forzar recarga
+        setTimeout(() => {
+            if (!document.hidden) {
+                location.reload();
+            }
+        }, 60000);
     </script>
 </body>
 </html>

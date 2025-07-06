@@ -6,9 +6,6 @@ from datetime import datetime, timedelta
 import plotly.graph_objs as go
 import threading
 import os
-import requests
-import json
-from apscheduler.schedulers.background import BackgroundScheduler
 import logging
 import ccxt
 import queue
@@ -48,12 +45,11 @@ symbols = [
 ]
 
 # Variables globales
-rsi_data = pd.DataFrame()
+crypto_data = {}  # Diccionario para almacenar datos por símbolo
 last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
-data_ready = False
 data_queue = queue.Queue()
-last_data_attempt = datetime.utcnow()
+initial_data_ready = threading.Event()  # Evento para indicar que hay datos iniciales
 
 current_config = {
     'timeframe': ('15m', '1h'),
@@ -79,19 +75,20 @@ TIMEFRAME_MAP = {
 # Funciones de cálculo
 def compute_rsi(series, period=14):
     """Calcula el RSI para una serie de precios"""
+    if len(series) < 2:
+        return 50
+    
     delta = series.diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
     
-    # Manejo especial para series con menos de 2 elementos
-    if len(up) < 2 or len(down) < 2:
-        return pd.Series([50] * len(series), 0
-    
     ma_up = up.ewm(alpha=1/period, adjust=False).mean()
     ma_down = down.ewm(alpha=1/period, adjust=False).mean()
+    
+    # Evitar división por cero
     rs = ma_up / ma_down
     rsi = 100 - (100 / (1 + rs))
-    return rsi, ma_up.iloc[-1] if not ma_up.empty else 0
+    return rsi
 
 def fetch_ohlcv(symbol, timeframe, limit=100):
     """Obtiene datos OHLCV del exchange"""
@@ -106,180 +103,125 @@ def fetch_ohlcv(symbol, timeframe, limit=100):
         df.set_index('timestamp', inplace=True)
         return df
     except Exception as e:
-        logger.error(f"Error obteniendo datos para {symbol} {timeframe}: {str(e)}")
+        logger.warning(f"Error obteniendo datos para {symbol} {timeframe}: {str(e)}")
         return None
 
 def calculate_rsi_for_symbol(symbol):
     """Calcula todos los RSI para un símbolo"""
+    asset_data = {
+        'symbol': symbol,
+        '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
+        '4h': 50, '1d': 50, '1w': 50,
+        'volume': 0,
+        'status': 'loaded'
+    }
+    
     try:
-        asset_data = {}
-        volumes = []
+        volumes = 0
         
         # Obtener datos para cada timeframe
         for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
             df = fetch_ohlcv(symbol, tf)
-            if df is not None and not df.empty and len(df) > 14:
-                rsi, volume = compute_rsi(df['close'], current_config['rsi_period'])
-                # Usar el último valor disponible, o 50 si no hay datos
-                asset_data[tf] = rsi.iloc[-1] if not rsi.empty else 50
+            if df is not None and not df.empty:
+                rsi_series = compute_rsi(df['close'], current_config['rsi_period'])
+                
+                if rsi_series is not None and not rsi_series.empty:
+                    asset_data[tf] = rsi_series.iloc[-1]
                 
                 # Usar volumen del timeframe de 1h como referencia
                 if tf == '1h':
-                    volumes = volume
-            else:
-                asset_data[tf] = 50
-                volumes = 0
+                    volumes = df['volume'].mean() if not df.empty else 0
         
-        asset_data['symbol'] = symbol
         asset_data['volume'] = volumes
         return asset_data
     except Exception as e:
-        logger.error(f"Error procesando {symbol}: {str(e)}")
+        logger.warning(f"Error procesando {symbol}: {str(e)}")
         # Devolver datos predeterminados para este símbolo
-        return {
-            'symbol': symbol,
-            '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
-            '4h': 50, '1d': 50, '1w': 50,
-            'volume': 0
-        }
+        return asset_data
 
-def fetch_all_data():
-    """Obtiene y procesa todos los datos de las criptomonedas"""
-    global rsi_data, last_update_time, data_ready, last_data_attempt
+def fetch_crypto_data():
+    """Obtiene y procesa datos de criptomonedas en segundo plano"""
+    global crypto_data, last_update_time
     
-    last_data_attempt = datetime.utcnow()
     logger.info("Iniciando actualización de datos...")
     start_time = time.time()
+    symbols_processed = 0
     
-    try:
-        results = []
-        total = len(symbols)
-        
-        # Procesar solo los primeros 5 símbolos para mostrar rápido
-        initial_symbols = symbols[:5]
-        for symbol in initial_symbols:
-            try:
-                result = calculate_rsi_for_symbol(symbol)
-                if result:
-                    results.append(result)
-                    logger.info(f"Datos de {symbol} obtenidos")
-                    
-                    # Enviar progreso a la cola
-                    data_queue.put({
-                        'progress': len(results),
-                        'total': len(initial_symbols),
-                        'message': f"Obteniendo datos: {len(results)}/{len(initial_symbols)}"
-                    })
-            except Exception as e:
-                logger.error(f"Error crítico procesando {symbol}: {str(e)}")
-                # Añadir datos predeterminados incluso si hay error
-                results.append({
+    # Procesar todos los símbolos con manejo de errores robusto
+    for symbol in symbols:
+        try:
+            # Pequeña pausa para evitar rate limits
+            time.sleep(0.2)
+            
+            result = calculate_rsi_for_symbol(symbol)
+            if result:
+                with data_lock:
+                    crypto_data[symbol] = result
+                    symbols_processed += 1
+                
+                # Enviar progreso a la cola
+                data_queue.put({
                     'symbol': symbol,
-                    '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
-                    '4h': 50, '1d': 50, '1w': 50,
-                    'volume': 0
+                    'count': symbols_processed,
+                    'total': len(symbols)
                 })
-        
-        if results:
-            df = pd.DataFrame(results)
+                
+                # Si es el primer símbolo, señalar que hay datos iniciales
+                if symbols_processed == 1:
+                    initial_data_ready.set()
+        except Exception as e:
+            logger.error(f"Error crítico procesando {symbol}: {str(e)}")
+    
+    # Calcular categorías de volumen después de tener todos los datos
+    with data_lock:
+        volumes = [data['volume'] for data in crypto_data.values()]
+        if volumes:
+            high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
+            low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
             
-            # Calcular categorías de volumen
-            if len(df) > 0:
-                volumes = df['volume'].values
-                if len(volumes) > 0:
-                    high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
-                    low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
-                    df['volume_cat'] = df.apply(lambda row: 
-                        'Alto' if row['volume'] >= high_thresh else 
-                        'Bajo' if row['volume'] <= low_thresh else 
-                        'Medio', axis=1)
+            for symbol, data in crypto_data.items():
+                volume = data['volume']
+                if volume >= high_thresh:
+                    crypto_data[symbol]['volume_cat'] = 'Alto'
+                elif volume <= low_thresh:
+                    crypto_data[symbol]['volume_cat'] = 'Bajo'
                 else:
-                    df['volume_cat'] = ['Medio'] * len(results)
-            else:
-                df['volume_cat'] = ['Medio'] * len(results)
-            
-            with data_lock:
-                rsi_data = df
-                last_update_time = datetime.utcnow()
-                data_ready = True
-            logger.info(f"Datos iniciales actualizados. Monedas: {len(results)}/{len(initial_symbols)}")
-            
-            # Continuar con el resto de los símbolos en segundo plano
-            threading.Thread(target=load_remaining_data, args=(results,)).start()
+                    crypto_data[symbol]['volume_cat'] = 'Medio'
         else:
-            logger.warning("No se obtuvieron datos para ninguna moneda")
-            data_ready = True  # Mostrar aunque esté vacío
-    except Exception as e:
-        logger.error(f"Error crítico en fetch_all_data: {str(e)}")
-        data_ready = True  # Forzar mostrar aunque haya error
+            for symbol in crypto_data:
+                crypto_data[symbol]['volume_cat'] = 'Medio'
     
+    last_update_time = datetime.utcnow()
     elapsed = time.time() - start_time
-    logger.info(f"Tiempo total de actualización inicial: {elapsed:.2f} segundos")
-    return data_ready
+    logger.info(f"Datos actualizados en {elapsed:.2f} segundos. Símbolos: {symbols_processed}/{len(symbols)}")
 
-def load_remaining_data(initial_results):
-    """Carga el resto de los datos en segundo plano"""
-    global rsi_data, last_update_time
-    
-    try:
-        results = initial_results.copy()
-        remaining_symbols = symbols[5:]
+def get_plot_data():
+    """Obtiene datos para el gráfico, filtrados según configuración"""
+    with data_lock:
+        # Crear lista de datos
+        data_list = [data for data in crypto_data.values()]
         
-        for symbol in remaining_symbols:
-            try:
-                time.sleep(0.1)  # Pequeña pausa para evitar rate limits
-                result = calculate_rsi_for_symbol(symbol)
-                if result:
-                    results.append(result)
-                    logger.info(f"Datos de {symbol} obtenidos (fondo)")
-            except Exception as e:
-                logger.error(f"Error procesando {symbol} (fondo): {str(e)}")
-                # Añadir datos predeterminados
-                results.append({
-                    'symbol': symbol,
-                    '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
-                    '4h': 50, '1d': 50, '1w': 50,
-                    'volume': 0
-                })
+        if not data_list:
+            return pd.DataFrame()
         
-        if results:
-            df = pd.DataFrame(results)
-            
-            # Calcular categorías de volumen
-            if len(df) > 0:
-                volumes = df['volume'].values
-                if len(volumes) > 0:
-                    high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
-                    low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
-                    df['volume_cat'] = df.apply(lambda row: 
-                        'Alto' if row['volume'] >= high_thresh else 
-                        'Bajo' if row['volume'] <= low_thresh else 
-                        'Medio', axis=1)
-                else:
-                    df['volume_cat'] = ['Medio'] * len(results)
-            else:
-                df['volume_cat'] = ['Medio'] * len(results)
-            
-            with data_lock:
-                rsi_data = df
-                last_update_time = datetime.utcnow()
-            logger.info(f"Datos completos actualizados. Monedas: {len(results)}/{len(symbols)}")
-            
-            # Notificar que los datos completos están listos
-            data_queue.put({'complete': True})
-    except Exception as e:
-        logger.error(f"Error cargando datos restantes: {str(e)}")
+        df = pd.DataFrame(data_list)
+        
+        # Filtrar por volumen si es necesario
+        if current_config['volume_filter'] != 'Todas':
+            df = df[df['volume_cat'] == current_config['volume_filter']]
+        
+        return df
 
 def create_plot():
-    """Crea el gráfico Plotly"""
-    global rsi_data
+    """Crea el gráfico Plotly con los datos disponibles"""
+    plot_data = get_plot_data()
     
     # Crear figura
     fig = go.Figure()
     
-    if rsi_data.empty:
+    if plot_data.empty:
         fig.add_annotation(
-            text="No se pudieron cargar datos. Intente actualizar más tarde.",
+            text="No hay datos disponibles. Intente actualizar más tarde.",
             x=0.5, y=0.5, 
             showarrow=False, 
             font=dict(size=24, color="red")
@@ -290,11 +232,6 @@ def create_plot():
             height=700
         )
         return fig
-    
-    # Filtrar datos
-    plot_data = rsi_data.copy()
-    if current_config['volume_filter'] != 'Todas':
-        plot_data = plot_data[plot_data['volume_cat'] == current_config['volume_filter']]
     
     # Obtener ejes
     x_time, y_time = current_config['timeframe']
@@ -380,7 +317,7 @@ def create_plot():
     title = f"RSI ({current_config['timeframe'][0]} vs {current_config['timeframe'][1]}) | Período: {current_config['rsi_period']} | Filtro: {current_config['volume_filter']}"
     
     fig.update_layout(
-        title=dict(text=f"{title}<br>{now}", font=dict(size=24)),
+        title=dict(text=f"{title}<br>{now}", font=dict(size=20)),
         xaxis_title=f"RSI {current_config['timeframe'][0]} (Límites: {current_config['lower_x']}/{current_config['upper_x']})",
         yaxis_title=f"RSI {current_config['timeframe'][1]} (Límites: {current_config['lower_y']}/{current_config['upper_y']})",
         xaxis=dict(
@@ -392,7 +329,7 @@ def create_plot():
             gridwidth=1,
             gridcolor='lightgray',
             zeroline=False,
-            tickfont=dict(size=14)
+            tickfont=dict(size=12)
         ),
         yaxis=dict(
             range=[0, 100],
@@ -403,12 +340,12 @@ def create_plot():
             gridwidth=1,
             gridcolor='lightgray',
             zeroline=False,
-            tickfont=dict(size=14)
+            tickfont=dict(size=12)
         ),
         template="plotly_white",
         showlegend=False,
         height=700,
-        margin=dict(l=80, r=80, b=100, t=120, pad=20)
+        margin=dict(l=80, r=80, b=100, t=100, pad=10)
     )
     
     return fig
@@ -416,44 +353,57 @@ def create_plot():
 # Ruta principal
 @app.route('/')
 def index():
-    global data_ready, last_data_attempt
+    # Iniciar carga de datos si es la primera vez
+    if not crypto_data:
+        threading.Thread(target=fetch_crypto_data).start()
     
-    # Si han pasado más de 30 segundos desde el último intento y no hay datos, forzar recarga
-    if not data_ready and (datetime.utcnow() - last_data_attempt).total_seconds() > 30:
-        data_ready = True
-    
-    # Si los datos no están listos, mostrar página de carga
-    if not data_ready:
-        return render_template('loading.html')
+    # Esperar hasta que haya al menos algunos datos
+    initial_data_ready.wait(timeout=10)
     
     fig = create_plot()
     graph_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-    return render_template('index.html', graph_html=graph_html, 
+    
+    # Obtener contador de símbolos cargados
+    with data_lock:
+        loaded_count = len(crypto_data)
+    
+    return render_template('index.html', 
+                           graph_html=graph_html, 
                            current_config=current_config,
-                           last_update=last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
+                           last_update=last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                           loaded_count=loaded_count,
+                           total_count=len(symbols))
 
 # Ruta para verificar estado de datos
 @app.route('/data_status')
 def data_status():
-    global data_ready
-    
     # Verificar si hay actualizaciones de progreso
     progress = None
     while not data_queue.empty():
         progress = data_queue.get_nowait()
     
+    with data_lock:
+        loaded_count = len(crypto_data)
+    
     return jsonify({
-        'ready': data_ready,
+        'loaded': loaded_count,
+        'total': len(symbols),
         'progress': progress
     })
 
-# Ruta para forzar actualización
-@app.route('/refresh')
-def refresh():
-    global data_ready
-    data_ready = False
-    threading.Thread(target=fetch_all_data).start()
-    return jsonify({"status": "Actualización iniciada"})
+# Ruta para actualizar el gráfico
+@app.route('/update_graph')
+def update_graph():
+    fig = create_plot()
+    graph_html = fig.to_html(full_html=False, include_plotlyjs=False)
+    
+    with data_lock:
+        loaded_count = len(crypto_data)
+    
+    return jsonify({
+        'graph_html': graph_html,
+        'loaded_count': loaded_count
+    })
 
 # API para actualizar configuración
 @app.route('/update_config', methods=['POST'])
@@ -498,50 +448,21 @@ def update_config():
     
     # Forzar recálculo si se cambió periodo
     if need_data_reload:
-        global data_ready
-        data_ready = False
-        threading.Thread(target=fetch_all_data).start()
+        # Limpiar datos existentes y recargar
+        with data_lock:
+            crypto_data.clear()
+        threading.Thread(target=fetch_crypto_data).start()
     
-    # Crear nuevo gráfico
-    fig = create_plot()
-    graph_html = fig.to_html(full_html=False, include_plotlyjs=False)
-    
-    return jsonify({
-        'success': True,
-        'graph_html': graph_html,
-        'last_update': last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-    })
-
-# Programar actualizaciones periódicas
-scheduler = None
-if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-    try:
-        scheduler = BackgroundScheduler()
-        scheduler.add_job(
-            fetch_all_data, 
-            'interval', 
-            minutes=15,
-            max_instances=1
-        )
-        scheduler.start()
-        logger.info("Scheduler de actualización iniciado")
-    except Exception as e:
-        logger.error(f"Error iniciando scheduler: {e}")
-
-# Iniciar la carga de datos al arrancar
-def start_data_loading():
-    global data_ready
-    logger.info("Iniciando carga inicial de datos...")
-    fetch_all_data()
+    return jsonify({'success': True})
 
 # Iniciar la aplicación
 if __name__ == '__main__':
     # Iniciar la carga de datos en un hilo separado
-    threading.Thread(target=start_data_loading).start()
+    threading.Thread(target=fetch_crypto_data).start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 else:
     # Para entornos WSGI como Render
-    threading.Thread(target=start_data_loading).start()
+    threading.Thread(target=fetch_crypto_data).start()

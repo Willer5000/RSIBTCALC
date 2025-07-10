@@ -1,14 +1,13 @@
-import os
-import time
-import threading
-import logging
-from datetime import datetime
 from flask import Flask, render_template, jsonify, request
 import pandas as pd
 import numpy as np
+import time
+from datetime import datetime, timedelta
 import plotly.graph_objs as go
+import threading
+import os
+import logging
 import ccxt
-from apscheduler.schedulers.background import BackgroundScheduler
 import queue
 
 # Configurar logging
@@ -17,34 +16,41 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Top 90 criptomonedas
+# Configuración de exchange - Usamos KuCoin
+exchange = ccxt.kucoin({
+    'enableRateLimit': True,
+    'timeout': 30000,
+    'options': {
+        'defaultType': 'spot'
+    }
+})
+
+# Top 60 criptomonedas por capitalización (símbolos de trading)
 symbols = [
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 
-    'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'LINK/USDT',
-    'MATIC/USDT', 'SHIB/USDT', 'LTC/USDT', 'UNI/USDT', 'ATOM/USDT',
-    'XLM/USDT', 'ETC/USDT', 'FIL/USDT', 'APT/USDT', 'ARB/USDT',
-    'NEAR/USDT', 'OP/USDT', 'VET/USDT', 'QNT/USDT', 'RUNE/USDT',
-    'ALGO/USDT', 'GRT/USDT', 'AAVE/USDT', 'AXS/USDT', 'XTZ/USDT',
-    'STX/USDT', 'EGLD/USDT', 'THETA/USDT', 'EOS/USDT', 'FLOW/USDT',
-    'SAND/USDT', 'MANA/USDT', 'APE/USDT', 'CRV/USDT', 'KAVA/USDT',
-    'IMX/USDT', 'RNDR/USDT', 'MINA/USDT', 'MKR/USDT', 'SNX/USDT',
-    'COMP/USDT', 'ZEC/USDT', 'DASH/USDT', 'ENJ/USDT', 'IOTA/USDT',
-    'KSM/USDT', 'XMR/USDT', 'NEO/USDT', 'GALA/USDT', 'CHZ/USDT',
-    'LDO/USDT', 'WAVES/USDT', 'ROSE/USDT', 'ONE/USDT', 'HNT/USDT',
-    'FTM/USDT', 'DYDX/USDT', 'SUSHI/USDT', 'MAGIC/USDT', 'AUDIO/USDT',
-    'ENS/USDT', 'GMT/USDT', 'BLUR/USDT', 'PEPE/USDT', 'LQTY/USDT',
-    'SSV/USDT', 'TRX/USDT', 'XEC/USDT', 'INJ/USDT', 'STG/USDT',
-    'HBAR/USDT', 'ICP/USDT', 'CRO/USDT', 'KLAY/USDT', 'RPL/USDT',
-    'GMX/USDT', 'CFX/USDT', 'TWT/USDT', '1INCH/USDT', 'FXS/USDT',
-    'KAS/USDT', 'BSV/USDT', 'BCH/USDT', 'ZIL/USDT', 'FET/USDT'
+    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 
+    'XRP/USDT', 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT',
+    'DOT/USDT', 'LINK/USDT', 'MATIC/USDT', 'SHIB/USDT',
+    'LTC/USDT', 'UNI/USDT', 'ATOM/USDT', 'XLM/USDT',
+    'ETC/USDT', 'FIL/USDT', 'APT/USDT', 'ARB/USDT',
+    'NEAR/USDT', 'OP/USDT', 'VET/USDT', 'QNT/USDT',
+    'RUNE/USDT', 'ALGO/USDT', 'GRT/USDT', 'AAVE/USDT',
+    'AXS/USDT', 'XTZ/USDT', 'STX/USDT', 'EGLD/USDT',
+    'THETA/USDT', 'EOS/USDT', 'FLOW/USDT', 'SAND/USDT',
+    'MANA/USDT', 'APE/USDT', 'CRV/USDT', 'KAVA/USDT',
+    'IMX/USDT', 'RNDR/USDT', 'MINA/USDT', 'MKR/USDT',
+    'SNX/USDT', 'COMP/USDT', 'ZEC/USDT', 'DASH/USDT',
+    'ENJ/USDT', 'IOTA/USDT', 'KSM/USDT', 'XMR/USDT',
+    'NEO/USDT', 'GALA/USDT', 'CHZ/USDT', 'LDO/USDT',
+    'WAVES/USDT', 'ROSE/USDT', 'ONE/USDT', 'HNT/USDT'
 ]
 
 # Variables globales
-crypto_data = {}
+crypto_data = {}  # Diccionario para almacenar datos por símbolo
 last_update_time = datetime.utcnow()
 data_lock = threading.Lock()
 data_queue = queue.Queue()
-initial_data_ready = threading.Event()
+initial_data_ready = threading.Event()  # Evento para indicar que hay datos iniciales
+
 current_config = {
     'timeframe': ('15m', '1h'),
     'volume_filter': 'Todas',
@@ -52,20 +58,23 @@ current_config = {
     'lower_x': 30,
     'upper_x': 70,
     'lower_y': 30,
-    'upper_y': 70,
-    'single_coin': 'Todas',
-    'sma1_period': 5,   # Nuevo parámetro SMA1
-    'sma2_period': 20    # Nuevo parámetro SMA2
+    'upper_y': 70
 }
 
-# Configuración de exchange
-exchange = ccxt.kucoin({
-    'enableRateLimit': True,
-    'timeout': 30000
-})
+# Mapeo de timeframes
+TIMEFRAME_MAP = {
+    '15m': '15m',
+    '30m': '30m',
+    '1h': '1h',
+    '2h': '2h',
+    '4h': '4h',
+    '1d': '1d',
+    '1w': '1w'
+}
 
 # Funciones de cálculo
 def compute_rsi(series, period=14):
+    """Calcula el RSI para una serie de precios"""
     if len(series) < 2:
         return 50
     
@@ -76,151 +85,146 @@ def compute_rsi(series, period=14):
     ma_up = up.ewm(alpha=1/period, adjust=False).mean()
     ma_down = down.ewm(alpha=1/period, adjust=False).mean()
     
+    # Evitar división por cero
     rs = ma_up / ma_down
     rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
+    return rsi
 
-def fetch_ohlcv(symbol, timeframe, limit=50):
+def fetch_ohlcv(symbol, timeframe, limit=100):
+    """Obtiene datos OHLCV del exchange"""
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if ohlcv:
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            return df
-        return None
+        tf = TIMEFRAME_MAP[timeframe]
+        ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=limit)
+        if not ohlcv:
+            return None
+            
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df
     except Exception as e:
-        logger.warning(f"Error obteniendo datos para {symbol} ({timeframe}): {str(e)}")
+        logger.warning(f"Error obteniendo datos para {symbol} {timeframe}: {str(e)}")
         return None
-
-def calculate_trend(df, sma1_period=5, sma2_period=20):
-    """Calcula la tendencia con SMA personalizables"""
-    if len(df) < max(sma1_period, sma2_period):
-        return "Lateral"
-    
-    df['SMA1'] = df['close'].rolling(window=sma1_period).mean()
-    df['SMA2'] = df['close'].rolling(window=sma2_period).mean()
-    
-    if df['SMA1'].iloc[-1] > df['SMA2'].iloc[-1]:
-        return "Alcista"
-    elif df['SMA1'].iloc[-1] < df['SMA2'].iloc[-1]:
-        return "Bajista"
-    else:
-        return "Lateral"
 
 def calculate_rsi_for_symbol(symbol):
+    """Calcula todos los RSI para un símbolo"""
     asset_data = {
         'symbol': symbol,
-        'rsi1': 50,
-        'rsi2': 50,
+        '15m': 50, '30m': 50, '1h': 50, '2h': 50, 
+        '4h': 50, '1d': 50, '1w': 50,
         'volume': 0,
-        'trend': "Lateral"
+        'status': 'loaded'
     }
     
     try:
-        tf1, tf2 = current_config['timeframe']
+        volumes = 0
         
-        # Obtener datos para el primer timeframe
-        df1 = fetch_ohlcv(symbol, tf1, limit=50)
-        if df1 is not None and not df1.empty:
-            asset_data['rsi1'] = compute_rsi(df1['close'], current_config['rsi_period'])
-            # Usar SMA personalizables
-            asset_data['trend'] = calculate_trend(
-                df1, 
-                current_config['sma1_period'], 
-                current_config['sma2_period']
-            )
-            asset_data['volume'] = df1['volume'].iloc[-1] if not df1.empty else 0
+        # Obtener datos para cada timeframe
+        for tf in ['15m', '30m', '1h', '2h', '4h', '1d', '1w']:
+            df = fetch_ohlcv(symbol, tf)
+            if df is not None and not df.empty:
+                rsi_series = compute_rsi(df['close'], current_config['rsi_period'])
+                
+                if rsi_series is not None and not rsi_series.empty:
+                    asset_data[tf] = rsi_series.iloc[-1]
+                
+                # Usar volumen del timeframe de 1h como referencia
+                if tf == '1h':
+                    volumes = df['volume'].mean() if not df.empty else 0
         
-        # Obtener datos para el segundo timeframe
-        df2 = fetch_ohlcv(symbol, tf2, limit=50)
-        if df2 is not None and not df2.empty:
-            asset_data['rsi2'] = compute_rsi(df2['close'], current_config['rsi_period'])
-        
+        asset_data['volume'] = volumes
         return asset_data
     except Exception as e:
         logger.warning(f"Error procesando {symbol}: {str(e)}")
+        # Devolver datos predeterminados para este símbolo
         return asset_data
 
 def fetch_crypto_data():
+    """Obtiene y procesa datos de criptomonedas en segundo plano"""
     global crypto_data, last_update_time
     
     logger.info("Iniciando actualización de datos...")
     start_time = time.time()
-    new_data = {}
+    symbols_processed = 0
     
-    # Procesar símbolos con notificación de progreso
-    for i, symbol in enumerate(symbols):
+    # Procesar todos los símbolos con manejo de errores robusto
+    for symbol in symbols:
         try:
+            # Pequeña pausa para evitar rate limits
+            time.sleep(0.2)
+            
             result = calculate_rsi_for_symbol(symbol)
             if result:
-                new_data[symbol] = result
-            
-            # Enviar progreso a la cola
-            data_queue.put({
-                'symbol': symbol,
-                'count': i + 1,
-                'total': len(symbols)
-            })
-            
-            # Pequeña pausa para evitar rate limits
-            time.sleep(0.1)
+                with data_lock:
+                    crypto_data[symbol] = result
+                    symbols_processed += 1
+                
+                # Enviar progreso a la cola
+                data_queue.put({
+                    'symbol': symbol,
+                    'count': symbols_processed,
+                    'total': len(symbols)
+                })
+                
+                # Si es el primer símbolo, señalar que hay datos iniciales
+                if symbols_processed == 1:
+                    initial_data_ready.set()
         except Exception as e:
-            logger.error(f"Error crítico en {symbol}: {str(e)}")
+            logger.error(f"Error crítico procesando {symbol}: {str(e)}")
     
-    # Calcular categorías de volumen
-    volumes = [data['volume'] for data in new_data.values()]
-    if volumes:
-        high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
-        low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
-        
-        for symbol, data in new_data.items():
-            volume = data['volume']
-            if volume >= high_thresh:
-                new_data[symbol]['volume_cat'] = 'Alto'
-            elif volume <= low_thresh:
-                new_data[symbol]['volume_cat'] = 'Bajo'
-            else:
-                new_data[symbol]['volume_cat'] = 'Medio'
-    
-    # Actualizar datos globales
+    # Calcular categorías de volumen después de tener todos los datos
     with data_lock:
-        crypto_data = new_data
-        last_update_time = datetime.utcnow()
+        volumes = [data['volume'] for data in crypto_data.values()]
+        if volumes:
+            high_thresh = np.percentile(volumes, 70) if len(volumes) > 1 else volumes[0] * 2
+            low_thresh = np.percentile(volumes, 30) if len(volumes) > 1 else volumes[0] / 2
+            
+            for symbol, data in crypto_data.items():
+                volume = data['volume']
+                if volume >= high_thresh:
+                    crypto_data[symbol]['volume_cat'] = 'Alto'
+                elif volume <= low_thresh:
+                    crypto_data[symbol]['volume_cat'] = 'Bajo'
+                else:
+                    crypto_data[symbol]['volume_cat'] = 'Medio'
+        else:
+            for symbol in crypto_data:
+                crypto_data[symbol]['volume_cat'] = 'Medio'
     
+    last_update_time = datetime.utcnow()
     elapsed = time.time() - start_time
-    logger.info(f"Datos actualizados en {elapsed:.2f} segundos. Símbolos: {len(crypto_data)}/{len(symbols)}")
-    initial_data_ready.set()
+    logger.info(f"Datos actualizados en {elapsed:.2f} segundos. Símbolos: {symbols_processed}/{len(symbols)}")
 
 def get_plot_data():
+    """Obtiene datos para el gráfico, filtrados según configuración"""
     with data_lock:
-        if not crypto_data:
+        # Crear lista de datos
+        data_list = [data for data in crypto_data.values()]
+        
+        if not data_list:
             return pd.DataFrame()
         
-        # Convertir a lista para DataFrame
-        data_list = list(crypto_data.values())
         df = pd.DataFrame(data_list)
         
         # Filtrar por volumen si es necesario
         if current_config['volume_filter'] != 'Todas':
             df = df[df['volume_cat'] == current_config['volume_filter']]
         
-        # Filtrar por moneda individual si es necesario
-        if current_config['single_coin'] != 'Todas':
-            df = df[(df['symbol'] == current_config['single_coin']) | (df['symbol'] == 'BTC/USDT')]
-        
         return df
 
 def create_plot():
+    """Crea el gráfico Plotly con los datos disponibles"""
     plot_data = get_plot_data()
+    
+    # Crear figura
     fig = go.Figure()
     
     if plot_data.empty:
         fig.add_annotation(
-            text="Cargando datos...",
+            text="No hay datos disponibles. Intente actualizar más tarde.",
             x=0.5, y=0.5, 
             showarrow=False, 
-            font=dict(size=24, color="blue")
+            font=dict(size=24, color="red")
         )
         fig.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
@@ -229,92 +233,84 @@ def create_plot():
         )
         return fig
     
-    # Mapeo de tendencia a símbolos de marcador
-    trend_to_marker = {
-        "Alcista": "triangle-up",
-        "Bajista": "triangle-down",
-        "Lateral": "circle"
-    }
+    # Obtener ejes
+    x_time, y_time = current_config['timeframe']
     
     # Crear trazas
+    traces = []
     for i, row in plot_data.iterrows():
         symbol = row['symbol']
         coin_name = symbol.split('/')[0]
         
-        # Asignar color por volumen
-        if row['volume_cat'] == 'Alto':
-            color = 'green'
-        elif row['volume_cat'] == 'Medio':
-            color = 'blue'
-        else:
-            color = 'red'
+        color = 'gold' if coin_name == 'BTC' else \
+                'green' if row['volume_cat'] == 'Alto' else \
+                'blue' if row['volume_cat'] == 'Medio' else 'red'
         
-        # Bitcoin será naranja
+        size = 50 if coin_name == 'BTC' else 30
+        
         if coin_name == 'BTC':
-            color = 'darkorange'
+            textfont = dict(size=18, color='darkorange', family='Arial', weight='bold')
+        else:
+            textfont = dict(size=14, color='black', weight='bold')
         
-        # Tamaño del marcador
-        size = 15 if coin_name == 'BTC' else 10
-        
-        # Símbolo del marcador según tendencia
-        marker_symbol = trend_to_marker.get(row['trend'], "circle")
-        
-        # Texto para el tooltip
-        hover_text = (f"{coin_name}<br>"
-                     f"RSI X: {row['rsi1']:.2f}<br>"
-                     f"RSI Y: {row['rsi2']:.2f}<br>"
-                     f"Volumen: ${row['volume']:,.0f} ({row['volume_cat']})<br>"
-                     f"Tendencia: {row['trend']}")
-        
-        fig.add_trace(go.Scatter(
-            x=[row['rsi1']],
-            y=[row['rsi2']],
-            mode='markers+text',
-            marker=dict(
-                symbol=marker_symbol,
-                size=size,
-                color=color,
-                line=dict(width=1, color='black')
-            ),
-            text=coin_name,
-            textposition='top center',
-            textfont=dict(
-                size=10 if coin_name != 'BTC' else 12,
-                color='black',
-                weight='bold'
-            ),
-            name=coin_name,
-            hoverinfo='text',
-            hovertext=hover_text
-        ))
+        # Verificar si existen los valores RSI
+        if x_time in row and y_time in row and not pd.isna(row[x_time]) and not pd.isna(row[y_time]):
+            traces.append(go.Scatter(
+                x=[row[x_time]],
+                y=[row[y_time]],
+                mode='markers+text',
+                marker=dict(
+                    size=size,
+                    color=color,
+                    line=dict(width=2, color='black')
+                ),
+                text=coin_name,
+                textposition='top center',
+                textfont=textfont,
+                name=coin_name,
+                hoverinfo='text',
+                hovertext=f"{coin_name}<br>RSI {x_time}: {row[x_time]:.2f}%<br>RSI {y_time}: {row[y_time]:.2f}%<br>Volumen: ${row['volume']:,.0f} ({row['volume_cat']})"
+            ))
     
-    # Añadir líneas de referencia
-    fig.add_shape(type="line", 
-                  x0=current_config['lower_x'], y0=0, 
-                  x1=current_config['lower_x'], y1=100,
-                  line=dict(color="Green", width=2, dash="dash"))
-    fig.add_shape(type="line", 
-                  x0=current_config['upper_x'], y0=0, 
-                  x1=current_config['upper_x'], y1=100,
-                  line=dict(color="Red", width=2, dash="dash"))
-    fig.add_shape(type="line", 
-                  x0=0, y0=current_config['lower_y'], 
-                  x1=100, y1=current_config['lower_y'],
-                  line=dict(color="Green", width=2, dash="dash"))
-    fig.add_shape(type="line", 
-                  x0=0, y0=current_config['upper_y'], 
-                  x1=100, y1=current_config['upper_y'],
-                  line=dict(color="Red", width=2, dash="dash"))
-    
-    # Añadir zonas
-    fig.add_hrect(y0=current_config['upper_y'], y1=100,
-                  line_width=0, fillcolor="red", opacity=0.15)
-    fig.add_hrect(y0=0, y1=current_config['lower_y'],
-                  line_width=0, fillcolor="green", opacity=0.15)
-    fig.add_vrect(x0=current_config['upper_x'], x1=100,
-                  line_width=0, fillcolor="red", opacity=0.15)
-    fig.add_vrect(x0=0, x1=current_config['lower_x'],
-                  line_width=0, fillcolor="green", opacity=0.15)
+    # Si no hay trazas, mostrar mensaje
+    if not traces:
+        fig.add_annotation(
+            text="Datos insuficientes para mostrar el gráfico",
+            x=0.5, y=0.5, 
+            showarrow=False, 
+            font=dict(size=24, color="red")
+        )
+    else:
+        # Añadir trazas a la figura
+        fig = go.Figure(data=traces)
+        
+        # Añadir líneas de referencia
+        fig.add_shape(type="line", 
+                      x0=current_config['lower_x'], y0=0, 
+                      x1=current_config['lower_x'], y1=100,
+                      line=dict(color="Green", width=3, dash="dash"))
+        fig.add_shape(type="line", 
+                      x0=current_config['upper_x'], y0=0, 
+                      x1=current_config['upper_x'], y1=100,
+                      line=dict(color="Red", width=3, dash="dash"))
+        fig.add_shape(type="line", 
+                      x0=0, y0=current_config['lower_y'], 
+                      x1=100, y1=current_config['lower_y'],
+                      line=dict(color="Green", width=3, dash="dash"))
+        fig.add_shape(type="line", 
+                      x0=0, y0=current_config['upper_y'], 
+                      x1=100, y1=current_config['upper_y'],
+                      line=dict(color="Red", width=3, dash="dash"))
+        
+        # Añadir zonas
+        fig.add_hrect(y0=current_config['upper_y'], y1=100,
+                      line_width=0, fillcolor="red", opacity=0.15)
+        fig.add_hrect(y0=0, y1=current_config['lower_y'],
+                      line_width=0, fillcolor="green", opacity=0.15)
+        fig.add_vrect(x0=current_config['upper_x'], x1=100,
+                      line_width=0, fillcolor="red", opacity=0.15)
+        fig.add_vrect(x0=0, x1=current_config['lower_x'],
+                      line_width=0, fillcolor="green", opacity=0.15)
     
     # Configurar layout
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M (UTC)")
@@ -328,7 +324,7 @@ def create_plot():
             range=[0, 100],
             tickmode='array',
             tickvals=list(range(0, 101, 10)),
-            ticktext=[f"{x}" for x in range(0, 101, 10)],
+            ticktext=[f"{x}%" for x in range(0, 101, 10)],
             showgrid=True,
             gridwidth=1,
             gridcolor='lightgray',
@@ -339,7 +335,7 @@ def create_plot():
             range=[0, 100],
             tickmode='array',
             tickvals=list(range(0, 101, 10)),
-            ticktext=[f"{y}" for y in range(0, 101, 10)],
+            ticktext=[f"{y}%" for y in range(0, 101, 10)],
             showgrid=True,
             gridwidth=1,
             gridcolor='lightgray',
@@ -357,15 +353,17 @@ def create_plot():
 # Ruta principal
 @app.route('/')
 def index():
+    # Iniciar carga de datos si es la primera vez
     if not crypto_data:
         threading.Thread(target=fetch_crypto_data).start()
     
-    # Esperar datos iniciales
+    # Esperar hasta que haya al menos algunos datos
     initial_data_ready.wait(timeout=10)
     
     fig = create_plot()
     graph_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
     
+    # Obtener contador de símbolos cargados
     with data_lock:
         loaded_count = len(crypto_data)
     
@@ -374,14 +372,14 @@ def index():
                            current_config=current_config,
                            last_update=last_update_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
                            loaded_count=loaded_count,
-                           total_count=len(symbols),
-                           symbols=symbols)
+                           total_count=len(symbols))
 
 # Ruta para verificar estado de datos
 @app.route('/data_status')
 def data_status():
+    # Verificar si hay actualizaciones de progreso
     progress = None
-    if not data_queue.empty():
+    while not data_queue.empty():
         progress = data_queue.get_nowait()
     
     with data_lock:
@@ -414,10 +412,8 @@ def update_config():
     param = data.get('param')
     value = data.get('value')
     
+    # Mapa de timeframes
     timeframe_map = {
-        '1m_5m': ('1m', '5m'),
-        '3m_15m': ('3m', '15m'),
-        '5m_30m': ('5m', '30m'),
         '15m_1h': ('15m', '1h'),
         '30m_2h': ('30m', '2h'),
         '1h_4h': ('1h', '4h'),
@@ -425,59 +421,48 @@ def update_config():
         '1d_1w': ('1d', '1w')
     }
     
-    need_refresh = False
+    # Determinar si se necesita recargar datos
+    need_data_reload = False
     
     with data_lock:
+        config = current_config.copy()
+        
         if param == 'timeframe':
-            current_config['timeframe'] = timeframe_map.get(value, ('15m', '1h'))
+            config['timeframe'] = timeframe_map.get(value, ('15m', '1h'))
         elif param == 'volume_filter':
-            current_config['volume_filter'] = value
+            config['volume_filter'] = value
         elif param == 'period':
-            current_config['rsi_period'] = int(value)
-            need_refresh = True
+            config['rsi_period'] = int(value)
+            need_data_reload = True
         elif param == 'lower_x':
-            current_config['lower_x'] = int(value)
+            config['lower_x'] = int(value)
         elif param == 'upper_x':
-            current_config['upper_x'] = int(value)
+            config['upper_x'] = int(value)
         elif param == 'lower_y':
-            current_config['lower_y'] = int(value)
+            config['lower_y'] = int(value)
         elif param == 'upper_y':
-            current_config['upper_y'] = int(value)
-        elif param == 'coin-filter':
-            current_config['single_coin'] = value
-        # Nuevos parámetros SMA
-        elif param == 'sma1':
-            current_config['sma1_period'] = int(value)
-        elif param == 'sma2':
-            current_config['sma2_period'] = int(value)
+            config['upper_y'] = int(value)
+        
+        # Actualizar config global
+        current_config.update(config)
     
-    # Si se cambió un parámetro que requiere recálculo
-    if need_refresh:
+    # Forzar recálculo si se cambió periodo
+    if need_data_reload:
+        # Limpiar datos existentes y recargar
+        with data_lock:
+            crypto_data.clear()
         threading.Thread(target=fetch_crypto_data).start()
     
     return jsonify({'success': True})
 
-# Función para actualizar datos periódicamente
-def scheduled_update():
-    logger.info("Ejecutando actualización programada de datos...")
-    fetch_crypto_data()
-
 # Iniciar la aplicación
 if __name__ == '__main__':
-    # Iniciar la carga de datos
+    # Iniciar la carga de datos en un hilo separado
     threading.Thread(target=fetch_crypto_data).start()
-    
-    # Programar actualizaciones cada 5 minutos
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scheduled_update, 'interval', minutes=5)
-    scheduler.start()
     
     # Obtener puerto de entorno o usar 5000 por defecto
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 else:
-    # Para entornos WSGI
+    # Para entornos WSGI como Render
     threading.Thread(target=fetch_crypto_data).start()
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scheduled_update, 'interval', minutes=5)
-    scheduler.start()

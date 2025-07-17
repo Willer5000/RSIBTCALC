@@ -1,7 +1,9 @@
 services:
   - type: web
-    name: rsibtcalc
+    name: crypto-trend-meter
     runtime: python
-    branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1
+    startCommand: gunicorn app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.12
